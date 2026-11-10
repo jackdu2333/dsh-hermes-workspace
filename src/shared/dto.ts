@@ -85,6 +85,19 @@ export interface GatewayEvent {
   [key: string]: unknown
 }
 
+/** gateway 主动发来的交互请求（审批 / 提问），等用户在面板里决定。
+ *  `id` 是 JSON-RPC 的 request id，回复时必须原样带回。 */
+export interface PendingRequest {
+  id: number | string
+  /** 'approval' | 'clarify'；其他类型面板不渲染。 */
+  method: string
+  sessionId?: string
+  params: Record<string, unknown>
+  receivedAt: number
+}
+
 export interface EventsPage {
   events: GatewayEvent[]
+  /** 全量对账用：卡片不在列表里即表示该请求已被后端撤回或已回复。 */
+  requests: PendingRequest[]
 }

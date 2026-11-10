@@ -2,7 +2,7 @@
 
 > **2026-11-10 现行决策**：见 [ADR-001](docs/ADR-001-gateway-protocol.md)——DSH 原生 UI 直连 Hermes TUI Gateway JSON-RPC；[P0-00](docs/P0-00-gateway-validation.md) 已执行完毕，UI 已实施。
 > 当前阶段：**Gateway Protocol Adapter 已在 DSH 中运行**；现行状态见下方「当前状态（现行）」，标题带「历史」的段落只作留痕。
-> 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`　版本：`0.1.26`
+> 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`　版本：`0.1.28`
 >
 > **0.1.4 起改为本机直连**：不再走 SSH / 端口转发，直接对接本机已运行的 Hermes gateway。
 > **0.1.17 起形态定案**：默认自建气泡对话；「终端」模式内嵌 Hermes TUI。原生桌面端 UI 无法 iframe（原因见「界面形态定案」）。
@@ -82,6 +82,37 @@ message.complete {text, outcome, usage}
 - **乐观发送**：submit 成功后立即插入用户消息并进入流式等待，不再等 1.8 秒的历史刷新。
 
 验证：本地临时脚本 `dist/verify-stream.mjs`（与 `applyEvents` 同一套折叠逻辑，不入库）用真实帧序列 + 边界用例覆盖拼接、去重、分段、工具插入、interim 去重，7/7 通过。
+
+## 审批与提问（2026-11-11 07:40，0.1.28）
+
+> 用户反馈：Hermes 原生窗口里的「审批 / 提问 / 对答」，插件里完全看不到。
+
+根因：这些是 **gateway → client 的反向 JSON-RPC request**，不是事件。之前的 `bindMessages` 把带 `method` 的帧一律回 `error: DSH client does not support request`，agent 直接拿到「客户端不支持」。
+
+协议（`tui_gateway/contracts/server_requests.py`）：
+
+```
+← { jsonrpc, id, method: "approval", params: { session_id, request_id, command, description, choices, tool_name, … } }
+→ { jsonrpc, id, result: { choice: "once" | "session" | "always" | "deny" } }
+
+← { jsonrpc, id, method: "clarify", params: { session_id, questions: [{ qid, question, choices?, multi_select? }] } }
+→ { jsonrpc, id, result: { answers: { qid: "选项或文本" | null }, outcome: "submitted" } }
+```
+
+实现要点：
+
+| 位置 | 做法 |
+|---|---|
+| 帧分类 | 响应必须同时满足「有 id」且「**没有 method**」。server request 也带 id，不区分会把它当 RPC 响应吞掉 |
+| 排队 | `GatewayTransport.requests` 保存未决请求，`getEvents` 顺带全量返回给面板 |
+| 回复 | `respondRequest({ id, result })` 用**原 id** 回包；成功后本地移除 |
+| 撤回 | `request.cancel` 事件带 `{ id, method, reason }`，收到就从队列剔除，避免对失效请求点「允许」 |
+| 降级 | sudo / secret / vault / preview 等仍明确回 `error`，别让 agent 干等 |
+| 断线 | `release()` / `onclose` 清空队列：连接没了，请求也失效 |
+
+UI：审批卡显示命令（服务端已脱敏）、描述、工具名，按钮按 `choices` 生成（允许一次 / 本会话 / 始终 / 拒绝）；提问卡支持单选、多选（`、` 拼接）与开放输入。
+
+**未验证**：本机 `~/.hermes/config.yaml` 里 `approvals.mode: "off"`，不会触发审批；用 probe 会话强令 agent 调 clarify 时它卡在空 assistant 行、`open_requests` 为空，怀疑 headless 连接上该工具不产生 server request。两条都需要在真实客户端里实测确认。
 
 **待办**：模型选择器（`/api/model/set` 仅对新会话生效，运行中会话需终端 `/model`）、附件上传（`/api/chat/image-upload`）。
 

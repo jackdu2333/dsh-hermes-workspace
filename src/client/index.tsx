@@ -8,6 +8,7 @@ import type {
   GatewayEvent,
   GatewayStatus,
   InterruptResult,
+  PendingRequest,
   PromptResult,
   ResumeResult,
 } from '../shared/dto'
@@ -26,6 +27,11 @@ type HermesRemote = {
     profile?: string
   }) => Promise<RemoteResult<InterruptResult>>
   getEvents: (request?: { profile?: string }) => Promise<RemoteResult<EventsPage>>
+  respondRequest: (request: {
+    id: number | string
+    result: Record<string, unknown>
+    profile?: string
+  }) => Promise<RemoteResult<PromptResult>>
 }
 
 type SlotCtx = {
@@ -54,6 +60,7 @@ const METHOD_PARAMETERS: Record<string, string[]> = {
   submitPrompt: ['request'],
   interruptSession: ['request'],
   getEvents: ['request'],
+  respondRequest: ['request'],
 }
 
 const METHOD_NAMES = [
@@ -65,6 +72,7 @@ const METHOD_NAMES = [
   'submitPrompt',
   'interruptSession',
   'getEvents',
+  'respondRequest',
 ] as const
 
 function buildContribution() {
@@ -164,6 +172,7 @@ function createApi(getRemote: () => HermesRemote | undefined): PanelApi {
     submitPrompt: request => call<PromptResult>('submitPrompt', request),
     interruptSession: request => call<InterruptResult>('interruptSession', request),
     getEvents: request => call<EventsPage>('getEvents', request),
+    respondRequest: request => call<PromptResult>('respondRequest', request),
   }
 }
 
@@ -274,6 +283,11 @@ type PanelApi = {
     profile?: string
   }) => Promise<InterruptResult>
   getEvents: (request?: { profile?: string }) => Promise<EventsPage>
+  respondRequest: (request: {
+    id: number | string
+    result: Record<string, unknown>
+    profile?: string
+  }) => Promise<PromptResult>
 }
 
 function stateLabel(state: GatewayStatus['state']): string {
@@ -291,6 +305,8 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [events, setEvents] = useState<GatewayEvent[]>([])
+  /** 等用户决定的审批 / 提问；gateway 会一直阻塞到收到回包。 */
+  const [requests, setRequests] = useState<PendingRequest[]>([])
   const [draft, setDraft] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -581,6 +597,22 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
     }
   }
 
+  /** 审批 / 提问的回包。result 的结构由 method 决定，原样交给 gateway。 */
+  async function respond(request: PendingRequest, result: Record<string, unknown>): Promise<void> {
+    if (!api) return
+    setBusy(true)
+    setError(null)
+    try {
+      const outcome = await api.respondRequest({ id: request.id, result, profile: currentProfile() })
+      if (!outcome.accepted) setError(outcome.errorMessage ?? '回复失败')
+      else setRequests(previous => previous.filter(item => String(item.id) !== String(request.id)))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   useEffect(() => {
     if (!api) return
     let cancelled = false
@@ -611,6 +643,15 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
         if (!cancelled && page.events.length) {
           setEvents(previous => [...previous, ...page.events].slice(-40))
           applyEvents(page.events)
+        }
+        if (!cancelled) {
+          const incoming = page.requests ?? []
+          // 内容没变就复用旧引用，避免每 160ms 都因为新数组重渲染一次。
+          setRequests(previous =>
+            previous.length === incoming.length && previous.every((item, index) => item.id === incoming[index].id)
+              ? previous
+              : incoming,
+          )
         }
         // 兜底：complete 帧在断线时可能丢，超过 12 秒没有收尾就把历史对齐一次。
         if (liveRef.current.active && liveStartedAt.current && Date.now() - liveStartedAt.current > 12000) {
@@ -656,6 +697,8 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
       : `${nativeOrigin}/sessions`
     : null
   const headerInitial = active ? (active.displayName || active.name).slice(0, 1).toUpperCase() : 'H'
+  /** 只显示属于当前会话的请求；同一条连接可能还在跑别的会话。 */
+  const visibleRequests = requests.filter(item => !item.sessionId || item.sessionId === sessionId)
 
   /** 把连续的工具消息聚成一组，渲染成紧凑的胶囊簇（参考 AI 原生界面的 tool chips）。 */
   const blocks: Array<{ key: string; message?: ChatMessage; tools?: ChatMessage[] }> = []
@@ -819,6 +862,14 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
                 ) : null,
               )}
               <LiveTurn live={liveRef.current} />
+              {visibleRequests.map(item => (
+                <RequestCard
+                  key={String(item.id)}
+                  request={item}
+                  busy={busy}
+                  onRespond={(target, result) => void respond(target, result)}
+                />
+              ))}
             </div>
 
             <div style={composerStyle} className="hw-composer">
@@ -854,6 +905,174 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
           </>
         ) : null}
       </section>
+    </div>
+  )
+}
+
+/** 审批 / 提问卡片。gateway 会一直阻塞到收到回包，所以必须显眼、按钮可点。 */
+function RequestCard({
+  request,
+  busy,
+  onRespond,
+}: {
+  request: PendingRequest
+  busy: boolean
+  onRespond: (request: PendingRequest, result: Record<string, unknown>) => void
+}) {
+  if (request.method === 'approval') return <ApprovalCard request={request} busy={busy} onRespond={onRespond} />
+  if (request.method === 'clarify') return <ClarifyCard request={request} busy={busy} onRespond={onRespond} />
+  return null
+}
+
+const APPROVAL_LABELS: Record<string, string> = {
+  once: '允许一次',
+  session: '本会话都允许',
+  always: '始终允许',
+  deny: '拒绝',
+}
+
+function ApprovalCard({
+  request,
+  busy,
+  onRespond,
+}: {
+  request: PendingRequest
+  busy: boolean
+  onRespond: (request: PendingRequest, result: Record<string, unknown>) => void
+}) {
+  const params = request.params
+  const command = typeof params.command === 'string' ? params.command : ''
+  const description = typeof params.description === 'string' ? params.description : ''
+  const toolName = typeof params.tool_name === 'string' ? params.tool_name : ''
+  // choices 是后端的权威列表；缺省时至少给「允许一次 / 拒绝」。
+  const choices = Array.isArray(params.choices) ? params.choices.map(String) : ['once', 'deny']
+  return (
+    <div style={requestCardStyle}>
+      <div style={requestHeadStyle}>
+        <span style={requestBadgeStyle}>需要审批</span>
+        {toolName ? <span style={requestMetaStyle}>{toolName}</span> : null}
+      </div>
+      {description ? <div style={requestDescStyle}>{description}</div> : null}
+      {command ? <pre style={requestCommandStyle}>{command}</pre> : null}
+      <div style={requestActionsStyle}>
+        {choices.map(choice => (
+          <button
+            key={choice}
+            type="button"
+            disabled={busy}
+            onClick={() => onRespond(request, { choice })}
+            style={{ ...requestButtonStyle, ...(choice === 'deny' ? requestButtonDangerStyle : {}) }}
+          >
+            {APPROVAL_LABELS[choice] ?? choice}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+type ClarifyQuestion = {
+  qid: string
+  question: string
+  choices?: string[]
+  multiSelect: boolean
+}
+
+/** clarify：1-5 个问题，可能带选项，也可能是开放输入。 */
+function ClarifyCard({
+  request,
+  busy,
+  onRespond,
+}: {
+  request: PendingRequest
+  busy: boolean
+  onRespond: (request: PendingRequest, result: Record<string, unknown>) => void
+}) {
+  const rawQuestions = Array.isArray(request.params.questions) ? request.params.questions : []
+  const questions: ClarifyQuestion[] = rawQuestions.map(item => {
+    const row = (item ?? {}) as Record<string, unknown>
+    return {
+      qid: String(row.qid ?? row.id ?? ''),
+      question: String(row.question ?? row.text ?? ''),
+      choices: Array.isArray(row.choices) && row.choices.length ? row.choices.map(String) : undefined,
+      multiSelect: row.multi_select === true,
+    }
+  })
+  const [answers, setAnswers] = useState<Record<string, string>>({})
+
+  const toggle = (question: ClarifyQuestion, choice: string) => {
+    setAnswers(previous => {
+      if (!question.multiSelect) return { ...previous, [question.qid]: choice }
+      const selected = (previous[question.qid] ?? '').split('、').filter(Boolean)
+      const next = selected.includes(choice)
+        ? selected.filter(item => item !== choice)
+        : [...selected, choice]
+      return { ...previous, [question.qid]: next.join('、') }
+    })
+  }
+
+  const submit = () => {
+    const payload: Record<string, string | null> = {}
+    for (const question of questions) {
+      const value = (answers[question.qid] ?? '').trim()
+      payload[question.qid] = value ? value : null
+    }
+    onRespond(request, { answers: payload, outcome: 'submitted' })
+  }
+
+  return (
+    <div style={requestCardStyle}>
+      <div style={requestHeadStyle}>
+        <span style={requestBadgeStyle}>需要你的回答</span>
+        {questions.length > 1 ? <span style={requestMetaStyle}>{questions.length} 个问题</span> : null}
+      </div>
+      {questions.map(question => (
+        <div key={question.qid} style={clarifyBlockStyle}>
+          <div style={requestDescStyle}>{question.question}</div>
+          {question.choices ? (
+            <div style={clarifyChoicesStyle}>
+              {question.choices.map(choice => {
+                const active = question.multiSelect
+                  ? (answers[question.qid] ?? '').split('、').includes(choice)
+                  : answers[question.qid] === choice
+                return (
+                  <button
+                    key={choice}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => toggle(question, choice)}
+                    style={{ ...clarifyChoiceStyle, ...(active ? clarifyChoiceActiveStyle : {}) }}
+                  >
+                    {choice}
+                  </button>
+                )
+              })}
+            </div>
+          ) : (
+            <input
+              type="text"
+              value={answers[question.qid] ?? ''}
+              disabled={busy}
+              onChange={event => setAnswers(previous => ({ ...previous, [question.qid]: event.target.value }))}
+              onKeyDown={event => {
+                if (event.key === 'Enter' && !event.nativeEvent.isComposing) submit()
+              }}
+              placeholder="输入回答…"
+              style={clarifyInputStyle}
+            />
+          )}
+        </div>
+      ))}
+      <div style={requestActionsStyle}>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={submit}
+          style={{ ...requestButtonStyle, ...requestButtonPrimaryStyle }}
+        >
+          提交
+        </button>
+      </div>
     </div>
   )
 }
@@ -1475,6 +1694,59 @@ const sendButtonReadyStyle: CSSProperties = {
   color: 'var(--dsw-alias-label-primary)',
 }
 const buttonDisabledStyle: CSSProperties = { opacity: 0.4, cursor: 'default' }
+
+/** 审批 / 提问卡片：像一条等待操作的浮层卡片，和正文拉开层次。 */
+const requestCardStyle: CSSProperties = {
+  alignSelf: 'stretch', display: 'flex', flexDirection: 'column', gap: 9,
+  padding: '12px 13px', borderRadius: 12, maxWidth: 580,
+  border: '1px solid color-mix(in srgb, var(--dsw-alias-label-primary) 15%, transparent)',
+  background: 'color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent)',
+}
+const requestHeadStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8 }
+const requestBadgeStyle: CSSProperties = {
+  fontSize: 10, letterSpacing: '0.04em', padding: '2px 7px', borderRadius: 5,
+  background: 'color-mix(in srgb, var(--dsw-alias-label-primary) 10%, transparent)',
+  color: 'var(--dsw-alias-label-primary)',
+}
+const requestMetaStyle: CSSProperties = { fontSize: 10.5, color: 'var(--dsw-alias-label-secondary)' }
+const requestDescStyle: CSSProperties = { fontSize: 12.5, lineHeight: 1.6, color: 'var(--dsw-alias-label-primary)' }
+const requestCommandStyle: CSSProperties = {
+  margin: 0, padding: '8px 10px', borderRadius: 8, maxHeight: 160, overflow: 'auto',
+  background: 'var(--dsw-alias-bg-secondary)', color: 'var(--dsw-alias-label-primary)',
+  fontSize: 11.5, lineHeight: 1.55, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+}
+const requestActionsStyle: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 7 }
+const requestButtonStyle: CSSProperties = {
+  padding: '5px 11px', borderRadius: 7, cursor: 'pointer', fontSize: 11.5,
+  border: '1px solid color-mix(in srgb, var(--dsw-alias-label-primary) 16%, transparent)',
+  background: 'transparent', color: 'var(--dsw-alias-label-primary)',
+}
+const requestButtonDangerStyle: CSSProperties = {
+  color: 'var(--dsw-alias-label-danger, #c0392b)',
+  borderColor: 'color-mix(in srgb, var(--dsw-alias-label-danger, #c0392b) 35%, transparent)',
+}
+const requestButtonPrimaryStyle: CSSProperties = {
+  background: 'color-mix(in srgb, var(--dsw-alias-label-primary) 12%, transparent)',
+  borderColor: 'color-mix(in srgb, var(--dsw-alias-label-primary) 26%, transparent)',
+}
+const clarifyBlockStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 6 }
+const clarifyChoicesStyle: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 6 }
+const clarifyChoiceStyle: CSSProperties = {
+  padding: '4px 10px', borderRadius: 999, cursor: 'pointer', fontSize: 11.5,
+  border: '1px solid color-mix(in srgb, var(--dsw-alias-label-primary) 12%, transparent)',
+  background: 'transparent', color: 'var(--dsw-alias-label-secondary)',
+}
+const clarifyChoiceActiveStyle: CSSProperties = {
+  background: 'color-mix(in srgb, var(--dsw-alias-label-primary) 14%, transparent)',
+  borderColor: 'color-mix(in srgb, var(--dsw-alias-label-primary) 30%, transparent)',
+  color: 'var(--dsw-alias-label-primary)',
+}
+const clarifyInputStyle: CSSProperties = {
+  padding: '6px 9px', borderRadius: 7, fontSize: 12.5,
+  border: '1px solid color-mix(in srgb, var(--dsw-alias-label-primary) 14%, transparent)',
+  background: 'transparent', color: 'inherit', outline: 'none',
+}
 const composerHintStyle: CSSProperties = {
   flexShrink: 0, margin: '6px 30px 14px', textAlign: 'right',
   fontSize: 10, letterSpacing: '0.01em', color: 'var(--dsw-alias-label-secondary)', opacity: 0.45,

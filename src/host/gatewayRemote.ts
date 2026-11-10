@@ -6,6 +6,17 @@ export interface GatewayTarget {
   profile: string
 }
 
+/** gateway 主动发来的交互请求（审批 / 提问）。
+ *  这类帧带 `method` + `id`，是 server→client 的 JSON-RPC request，
+ *  必须用**同一个 id** 回 result；回 error 会让 agent 拿到「客户端不支持」。 */
+export interface PendingRequest {
+  id: number | string
+  method: string
+  sessionId?: string
+  params: Record<string, unknown>
+  receivedAt: number
+}
+
 interface AttachInfo {
   api_origin: string
   ticket: string
@@ -73,6 +84,8 @@ export class GatewayTransport {
   private ws: WebSocket | null = null
   private readonly pending = new Map<number, Pending>()
   private events: GatewayEvent[] = []
+  /** 还等着用户决定的交互请求。面板每轮轮询取全量，用户点了才回包。 */
+  private requests: PendingRequest[] = []
   private seq = 0
   private state: GatewayState = 'disconnected'
   private lastError?: string
@@ -157,7 +170,9 @@ export class GatewayTransport {
         return
       }
       const id = frame.id
-      if (typeof id === 'number' && this.pending.has(id)) {
+      // 只有「带 id 且没有 method」才是我们自己发出去的 RPC 的响应。
+      // server→client 的审批请求同样带 id，不区分会把它误当成响应吞掉。
+      if (typeof id === 'number' && frame.method === undefined && this.pending.has(id)) {
         const pending = this.pending.get(id)!
         this.pending.delete(id)
         if (frame.error !== undefined) {
@@ -169,22 +184,41 @@ export class GatewayTransport {
       }
       if (frame.method === 'event') {
         const params = (frame.params ?? {}) as GatewayEvent
+        // 后端撤回请求时同步清卡片，否则用户会对一个已失效的审批点「允许」。
+        if (params.type === 'request.cancel') {
+          const payload = (params.payload ?? {}) as Record<string, unknown>
+          const cancelled = String(payload.id ?? '')
+          this.requests = this.requests.filter(item => String(item.id) !== cancelled)
+        }
         this.events.push(params)
         // 流式时 message.delta 是逐 token 来的，500 条在长回答里会被顶掉。
         if (this.events.length > 2000) this.events = this.events.slice(-2000)
         return
       }
-      // Gateway 主动发起的请求（approval / clarify 等）：P0 不提供交互 UI，
-      // 必须明确回错，否则 Agent 会一直等一个永远不来的响应。
+      // Gateway 主动发起的请求。审批与提问要渲染成卡片；其余（sudo 密码、secret、
+      // vault、预览桥）本面板没有对应 UI，仍要明确回错，否则 Agent 会一直等。
       if (frame.method !== undefined && id !== undefined) {
         const method = String(frame.method)
+        const params = (frame.params ?? {}) as Record<string, unknown>
+        if (method === 'approval' || method === 'clarify') {
+          this.requests = this.requests.filter(item => item.id !== id)
+          this.requests.push({
+            id: id as number | string,
+            method,
+            sessionId: typeof params.session_id === 'string' ? params.session_id : undefined,
+            params,
+            receivedAt: Date.now(),
+          })
+          this.events.push({ type: 'request.open', method, requestId: String(id) })
+          return
+        }
         this.events.push({
           type: 'unsupported_request',
-          detail: `${method} 已被 DSH 明确拒绝（P0 未实现交互审批）`,
+          detail: `${method} 已被 DSH 明确拒绝（面板暂未实现该交互）`,
           method,
           requestId: id,
         })
-        if (this.events.length > 500) this.events = this.events.slice(-500)
+        if (this.events.length > 2000) this.events = this.events.slice(-2000)
         try {
           ws.send(JSON.stringify({
             jsonrpc: '2.0',
@@ -200,6 +234,7 @@ export class GatewayTransport {
       if (this.ws === ws) {
         this.state = 'disconnected'
         this.ws = null
+        this.requests = []
         this.rejectPending(new Error('Gateway 连接已断开'))
       }
     }
@@ -214,6 +249,7 @@ export class GatewayTransport {
     const ws = this.ws
     this.ws = null
     if (ws && ws.readyState === WebSocket.OPEN) ws.close()
+    this.requests = []
     this.rejectPending(new Error('Gateway 连接已重置'))
   }
 
@@ -253,6 +289,31 @@ export class GatewayTransport {
     const drained = this.events
     this.events = []
     return drained
+  }
+
+  /** 全量返回：面板轮询时用它对账，卡片消失即请求已被撤回。 */
+  listRequests(): PendingRequest[] {
+    return this.requests
+  }
+
+  /** 用原 id 回包。result 结构由 method 决定：
+   *  approval → `{ choice: 'once'|'session'|'always'|'deny' }`
+   *  clarify  → `{ answers: { qid: text }, outcome: 'submitted' }` */
+  async respond(id: number | string, result: Record<string, unknown>): Promise<void> {
+    const index = this.requests.findIndex(item => String(item.id) === String(id))
+    if (index < 0) throw new Error('该请求已失效（可能已超时或被撤回）')
+    const ws = await this.ensureOpen()
+    ws.send(JSON.stringify({ jsonrpc: '2.0', id, result }))
+    this.requests.splice(index, 1)
+  }
+
+  /** 面板无法回答的交互：明确回错，别让 agent 一直等。 */
+  async reject(id: number | string, message: string): Promise<void> {
+    const index = this.requests.findIndex(item => String(item.id) === String(id))
+    if (index < 0) return
+    const ws = await this.ensureOpen()
+    ws.send(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32000, message } }))
+    this.requests.splice(index, 1)
   }
 
   close(): void {

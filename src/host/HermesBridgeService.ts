@@ -351,10 +351,29 @@ export class HermesBridgeService extends TypertRemoteService {
     }
   }
 
-  /** 事件按连接隔离，必须读当前 Bot 那条，否则会把别的 profile 的事件混进来。 */
+  /** 事件按连接隔离，必须读当前 Bot 那条，否则会把别的 profile 的事件混进来。
+   *  顺带把「还等着用户决定的审批/提问」一并带回去，省一次往返。 */
   async getEvents(request?: { profile?: string }): Promise<EventsPage> {
-    const events = this.transportFor(request?.profile).drainEvents()
-    return { events: events.filter(event => STREAM_EVENT_TYPES.has(String(event.type))) }
+    const transport = this.transportFor(request?.profile)
+    const events = transport.drainEvents()
+    return {
+      events: events.filter(event => STREAM_EVENT_TYPES.has(String(event.type))),
+      requests: transport.listRequests(),
+    }
+  }
+
+  /** 用户在面板里点了审批 / 提交了回答，用原 request id 回包给 gateway。 */
+  async respondRequest(request: {
+    id: number | string
+    result: Record<string, unknown>
+    profile?: string
+  }): Promise<PromptResult> {
+    try {
+      await this.transportFor(request?.profile).respond(request?.id, request?.result ?? {})
+      return { accepted: true }
+    } catch (error) {
+      return { accepted: false, errorMessage: error instanceof Error ? error.message : String(error) }
+    }
   }
 }
 
@@ -368,6 +387,7 @@ for (const name of [
   'submitPrompt',
   'interruptSession',
   'getEvents',
+  'respondRequest',
 ] as const) {
   ;(Remote(name) as (value: unknown, context: unknown) => void)(prototype[name], {
     name,
