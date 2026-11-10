@@ -313,6 +313,10 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
   const liveRef = useRef<LiveState>(emptyLive())
   const [liveVersion, setLiveVersion] = useState(0)
   const liveStartedAt = useRef(0)
+  /** 刚提交、但还没在服务端历史里出现的消息。
+   *  这期间任何一次历史刷新都会把它擦掉，表现就是「发出去没反应，等回复才一起冒出来」。 */
+  const pendingTextRef = useRef<string | null>(null)
+  const pendingSinceRef = useRef(0)
   /** 只有视口贴底时才跟随新消息；用户往上翻历史时不再强行拽回底部。 */
   const stickToBottom = useRef(true)
 
@@ -437,7 +441,9 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
         }
         case 'session.info': {
           // 兜底：complete 帧断线时可能丢，running 变 false 同样代表这一轮结束。
-          if (payload.running === false && live.active) {
+          // 必须要求草稿已经有内容，否则刚 submit、还没开始产出时的那几帧
+          // session.info（running 仍是 false）会立刻把这一轮判成结束。
+          if (payload.running === false && live.active && live.blocks.length > 0) {
             live.active = false
             completed = true
             changed = true
@@ -455,10 +461,15 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
   async function refreshHistory(): Promise<void> {
     if (!api || !sessionRef.current) return
     try {
-      applyResume(
-        await api.resumeSession({ sessionId: sessionRef.current, profile: currentProfile() }),
-        profileRef.current ?? '',
-      )
+      const resumed = await api.resumeSession({ sessionId: sessionRef.current, profile: currentProfile() })
+      // 乐观插入的那条还没落库时不能拿历史覆盖它；等它出现（或超时）再对齐。
+      const pending = pendingTextRef.current
+      if (pending && Date.now() - pendingSinceRef.current < 8000) {
+        const landed = resumed.messages.some(message => message.role === 'user' && message.text.trim() === pending)
+        if (!landed) return
+      }
+      pendingTextRef.current = null
+      applyResume(resumed, profileRef.current ?? '')
     } catch {
       // 轮询刷新失败时保留上一次历史，不打断界面
     }
@@ -484,6 +495,7 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
     try {
       // 切 Bot 时把上一轮的草稿丢掉，否则会串到另一个会话里。
       resetLive()
+      pendingTextRef.current = null
       applyResume(await api.openBot({ profile: row.name }), row.name)
       stickToBottom.current = true
     } catch (cause) {
@@ -508,6 +520,8 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
       }
       setDraft('')
       // 乐观插入：submit 是 fire-and-forget，不等历史回来就让用户看到自己发出去的那条。
+      pendingTextRef.current = text
+      pendingSinceRef.current = Date.now()
       setMessages(previous => [...previous, { id: `pending-${Date.now()}`, role: 'user', text }])
       // 立刻进入流式等待：事件一到就有草稿区可落笔，中间不再空 1.8 秒。
       liveRef.current = emptyLive()
@@ -531,6 +545,8 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
       const result = await api.submitPrompt({ sessionId, text: text.trim(), profile: currentProfile() })
       if (!result.accepted) setError(result.errorMessage ?? '重发失败')
       else {
+        pendingTextRef.current = text.trim()
+        pendingSinceRef.current = Date.now()
         liveRef.current = emptyLive()
         liveRef.current.active = true
         liveStartedAt.current = Date.now()
@@ -588,13 +604,8 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
           setStatus(next)
           const recovered = previousState.current !== 'online' && next.state === 'online'
           previousState.current = next.state
-          if (recovered && sessionRef.current) {
-            const resumed = await api.resumeSession({
-              sessionId: sessionRef.current,
-              profile: currentProfile(),
-            })
-            if (!cancelled) applyResume(resumed, profileRef.current ?? '')
-          }
+          // 重连后统一走 refreshHistory：它带有「乐观消息还没落库就别覆盖」的保护。
+          if (recovered && sessionRef.current) await refreshHistory()
         }
         const page = await api.getEvents({ profile: currentProfile() })
         if (!cancelled && page.events.length) {
