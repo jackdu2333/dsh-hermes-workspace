@@ -1,11 +1,13 @@
 import Schema from '@deepseek-ai/schemastery'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { PACKAGE_NAME, PANEL_ID, REMOTE_NAMESPACE } from '../shared/constants'
+import { spawn } from 'node:child_process'
 import type {
   ChatMessage,
   ConnectionConfig,
   ConnectionStatus,
   MessagePage,
+  OpenNativeResult,
   PingResult,
   SaveResult,
   SessionPage,
@@ -51,6 +53,18 @@ export class HermesBridgeService extends TypertRemoteService {
 
   async ping(): Promise<PingResult> {
     return { ok: true, plugin: PACKAGE_NAME, panelId: PANEL_ID, at: Date.now() }
+  }
+
+  async openNativeChat(): Promise<OpenNativeResult> {
+    const deeplink = await tryOpen(['open', 'hermes://open/'])
+    if (deeplink.ok) return { ok: true, method: 'deeplink' }
+    const app = await tryOpen(['open', '-a', 'Hermes'])
+    if (app.ok) return { ok: true, method: 'app' }
+    return {
+      ok: false,
+      method: 'app',
+      errorMessage: app.errorMessage || deeplink.errorMessage || '无法打开 Hermes Desktop',
+    }
   }
 
   async getConnectionStatus(): Promise<ConnectionStatus> {
@@ -203,6 +217,17 @@ function status(
   }
 }
 
+function tryOpen(argv: string[]): Promise<{ ok: boolean; errorMessage?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(argv[0]!, argv.slice(1), { stdio: 'ignore', detached: true })
+    child.once('error', (error) => resolve({ ok: false, errorMessage: error.message }))
+    child.once('spawn', () => {
+      child.unref()
+      resolve({ ok: true })
+    })
+  })
+}
+
 function extractText(item: Record<string, unknown>): string {
   if (typeof item.content === 'string') return item.content
   if (typeof item.text === 'string') return item.text
@@ -222,6 +247,7 @@ function extractText(item: Record<string, unknown>): string {
 const prototype = HermesBridgeService.prototype as unknown as Record<string, (...args: never[]) => Promise<unknown>>
 for (const name of [
   'ping',
+  'openNativeChat',
   'getConnectionStatus',
   'saveConnectionConfig',
   'saveApiKey',

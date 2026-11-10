@@ -35,6 +35,12 @@ export interface PingResult {
   at: number
 }
 
+export interface OpenNativeResult {
+  ok: boolean
+  method: 'deeplink' | 'app'
+  errorMessage?: string
+}
+
 export interface SessionSummary {
   id: string
   title: string

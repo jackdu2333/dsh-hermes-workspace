@@ -1,6 +1,6 @@
 # Hermes Workspace
 
-> 当前阶段：**接入现有 Hermes Desktop SSH dashboard**
+> 当前阶段：**DSH 侧边栏只作为 Hermes Desktop 原生 Bot 入口**
 > 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`
 
 DSH 原生双端插件：在左侧功能栏提供独立 Hermes 工作区，连接本机或经 SSH 隧道访问的 Hermes Agent API。插件不实现 Agent 能力，只负责连接、消息转换、状态呈现和交互控制。
@@ -22,10 +22,9 @@ P0 可用版本：用户能从 DSH 左侧进入 Hermes 工作区，配置连接�
 
 - 更新时间：2026-11-10
 - 适用版本：`@jackdu/dsh-hermes-workspace@0.1.0`，宿主 DSH `0.2.2-rc.1`，profile `desktop`
-- 当前阶段：对接 Hermes Desktop SSH dashboard `/api`
-- 已完成：Credentials 保存 URL/token、自动发现仍存活的本机转发端口、会话列表、历史消息
-- 未验证：`127.0.0.1:22222` 关闭时只能显示 offline，需 Desktop 重新连上后再测在线
-- 不做：插件不管理 SSH；不接 `/v1/runs`；发送与流式输出下一刀再做
+- 当前阶段：侧边栏 Hermes 点击后打开 Hermes Desktop 原生聊天区
+- 已完成：`open hermes://open/`，失败则 `open -a Hermes`
+- 不做：插件内不再自建会话列表、消息流或发送框
 
 ## 架构边界
 
@@ -86,6 +85,4 @@ pnpm build
 
 ## 下一步
 
-1. Desktop 连上 SSH 后，在工作区填入当前转发 URL 和 token，确认会话列表。
-2. 发送消息：优先 `POST /api/sessions/{id}/chat` 或 Desktop WS；现有 OpenAPI 没有 `/v1/runs`。
-3. 流式输出另开一刀。
+无。聊天能力全部留在 Hermes Desktop。
