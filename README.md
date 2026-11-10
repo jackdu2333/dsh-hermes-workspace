@@ -22,9 +22,9 @@ P0 可用版本：用户能从 DSH 左侧进入 Hermes 工作区，配置连接�
 
 - 更新时间：2026-11-10
 - 适用版本：`@jackdu/dsh-hermes-workspace@0.1.0`，宿主 DSH `0.2.2-rc.1`，profile `desktop`
-- 当前阶段：侧边栏 Hermes 显示官方 `hermes dashboard` 的 `/chat`（内嵌 TUI）
-- 已完成：发现本机带 SPA 的 dashboard（当前常见 `127.0.0.1:58559`），主面板直接打开 `/chat`
-- 不做：不自建聊天 UI；不把 headless `hermes serve`（SSH 动态端口）当成网页对话区
+- 当前阶段：侧边栏 Hermes 打开官方 `hermes dashboard` `/chat`（本机浏览器，同源）
+- 已完成：发现本机 SPA dashboard，并用系统浏览器打开 `/chat`
+- 不做：不在 DSH 里 iframe 嵌入 `/chat`（跨源会卡住 Loading chat）；不自建聊天 UI
 
 ## 架构边界
 

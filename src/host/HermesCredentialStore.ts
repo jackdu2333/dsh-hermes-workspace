@@ -1,4 +1,4 @@
-import { PACKAGE_NAME, API_KEY_RECORD_ID, CONNECTION_RECORD_ID } from '../shared/constants'
+import { CREDENTIAL_SCOPE, API_KEY_RECORD_ID, CONNECTION_RECORD_ID } from '../shared/constants'
 import type { ConnectionConfig } from '../shared/dto'
 
 type ApiKeyRecord = { kind: 'api-key'; key?: string; env?: Record<string, string> }
@@ -14,8 +14,8 @@ type Credentials = {
   ) => Promise<unknown>
 }
 
-const TOKEN_KEY = `${PACKAGE_NAME}/${API_KEY_RECORD_ID}`
-const CONNECTION_KEY = `${PACKAGE_NAME}/${CONNECTION_RECORD_ID}`
+const TOKEN_KEY = `${CREDENTIAL_SCOPE}/${API_KEY_RECORD_ID}`
+const CONNECTION_KEY = `${CREDENTIAL_SCOPE}/${CONNECTION_RECORD_ID}`
 
 export class HermesCredentialStore {
   constructor(private readonly credentials: Credentials | undefined) {}

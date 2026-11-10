@@ -7,7 +7,10 @@ export const PANEL_ID = 'hermes-workspace'
 /** Typert Remote namespace，Client 通过 ctx.remote.hermesWorkspace 访问。 */
 export const REMOTE_NAMESPACE = 'hermesWorkspace'
 
-/** 凭据记录 id；完整 key 为 `@jackdu/dsh-hermes-workspace/default-api-key`。 */
+/** Credentials 的 scope 段，须匹配 /^[a-z][a-z0-9-]*$/，不能用包名（含 @ 和 /）。 */
+export const CREDENTIAL_SCOPE = 'hermes-workspace'
+
+/** 凭据记录 id；完整 key 为 `hermes-workspace/default-api-key`。 */
 export const API_KEY_RECORD_ID = 'default-api-key'
 
 /** 连接配置记录（不含密钥正文以外的 token 时仍走 Credentials）。 */

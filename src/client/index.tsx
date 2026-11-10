@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react'
 import { PACKAGE_NAME, PANEL_ID, REMOTE_NAMESPACE } from '../shared/constants'
 import type { NativeChatTarget, OpenNativeResult } from '../shared/dto'
 
@@ -109,55 +109,56 @@ function HermesChatPanel(props: {
   }
 }) {
   const api = props.api
+  const opened = useRef(false)
   const [target, setTarget] = useState<NativeChatTarget | null>(null)
+  const [status, setStatus] = useState('正在打开 Hermes 原生对话区…')
   const [error, setError] = useState<string | null>(null)
 
-  async function refresh() {
+  async function openChat() {
     if (!api) {
       setError('Remote API 未注入')
       return
     }
+    setError(null)
     try {
       const next = await api.getNativeChatTarget()
       setTarget(next)
-      setError(next.available ? null : next.errorMessage || '未找到 Hermes dashboard')
+      if (!next.available) {
+        setError(next.errorMessage || '未找到 hermes dashboard')
+        setStatus('没有可用的原生 /chat')
+        return
+      }
+      const result = await api.openNativeChat()
+      if (result.ok) {
+        setStatus(`已打开 ${next.url}`)
+      } else {
+        setError(result.errorMessage || '无法打开浏览器')
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
   }
 
   useEffect(() => {
-    void refresh()
+    if (opened.current) return
+    opened.current = true
+    void openChat()
   }, [api])
-
-  if (target?.available && target.url) {
-    return (
-      <iframe
-        title="Hermes native chat"
-        src={target.url}
-        style={frameStyle}
-        allow="clipboard-read; clipboard-write"
-      />
-    )
-  }
 
   return (
     <div style={pageStyle}>
       <div style={kickerStyle}>Hermes</div>
       <h1 style={titleStyle}>原生 Bot 对话区</h1>
       <p style={bodyStyle}>
-        官方网页对话区是 `hermes dashboard` 的 `/chat`（内嵌 TUI）。当前 SSH 后端是 headless `hermes serve`，没有这套 UI。
+        官方网页 Chat 必须在它自己的 origin 打开（`hermes dashboard` 的 `/chat`）。嵌进 DSH 会被跨源拦住，PTY/WebSocket 会一直停在 Loading chat。
       </p>
-      {error ? <p style={errorStyle}>{error}</p> : <p style={mutedStyle}>正在查找本机 dashboard…</p>}
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button type="button" style={buttonStyle} onClick={() => void refresh()}>重新查找</button>
-        <button type="button" style={buttonStyle} onClick={() => void api?.openNativeChat()}>在浏览器打开</button>
-      </div>
+      <p style={mutedStyle}>{status}{target?.version ? ` · ${target.version}` : ''}</p>
+      {error ? <p style={errorStyle}>{error}</p> : null}
+      <button type="button" style={buttonStyle} onClick={() => void openChat()}>打开 Hermes Chat</button>
     </div>
   )
 }
 
-const frameStyle: CSSProperties = { width: '100%', height: '100%', border: 'none', background: 'var(--dsw-alias-bg-primary)' }
 const pageStyle: CSSProperties = {
   display: 'flex', flexDirection: 'column', gap: 12, height: '100%', padding: 32,
   boxSizing: 'border-box', background: 'var(--dsw-alias-bg-primary)', color: 'var(--dsw-alias-label-primary)',
