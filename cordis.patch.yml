@@ -1,0 +1,3 @@
+- insert:
+    - id: hermes-workspace
+      name: '@jackdu/dsh-hermes-workspace'

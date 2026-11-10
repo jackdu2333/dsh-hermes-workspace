@@ -7,14 +7,15 @@
 !.env.example
 *.local
 
-# 常见依赖与缓存目录（技术栈未定，先按最可能的形态兜底）
+# 依赖与缓存
 node_modules/
 .venv/
 __pycache__/
 *.pyc
 
-# 构建产物与日志
+# 构建缓存与日志（lib/ 是插件运行入口，需提交）
 dist/
 build/
 logs/
 *.log
+*.tsbuildinfo
