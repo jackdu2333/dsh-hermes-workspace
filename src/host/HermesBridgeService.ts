@@ -7,13 +7,14 @@ import type {
   ConnectionConfig,
   ConnectionStatus,
   MessagePage,
+  NativeChatTarget,
   OpenNativeResult,
   PingResult,
   SaveResult,
   SessionPage,
   SessionSummary,
 } from '../shared/dto'
-import { discoverHermesDesktop } from './discover'
+import { discoverDashboardSpa, discoverHermesDesktop } from './discover'
 import { HermesApiClient, HermesHttpError } from './HermesApiClient'
 import { HermesCredentialStore } from './HermesCredentialStore'
 import { normalizeBaseUrl } from './url'
@@ -55,7 +56,22 @@ export class HermesBridgeService extends TypertRemoteService {
     return { ok: true, plugin: PACKAGE_NAME, panelId: PANEL_ID, at: Date.now() }
   }
 
+  async getNativeChatTarget(): Promise<NativeChatTarget> {
+    const spa = await discoverDashboardSpa()
+    if (spa) return { available: true, url: spa.url, version: spa.version }
+    return {
+      available: false,
+      errorMessage: '本机没有可用的 hermes dashboard（原生 /chat）。当前 SSH 后端是 headless serve，没有网页对话区。请先运行 hermes dashboard。',
+    }
+  }
+
   async openNativeChat(): Promise<OpenNativeResult> {
+    const spa = await discoverDashboardSpa()
+    if (spa) {
+      const opened = await tryOpen(['open', spa.url])
+      if (opened.ok) return { ok: true, method: 'dashboard' }
+      return { ok: false, method: 'dashboard', errorMessage: opened.errorMessage }
+    }
     const deeplink = await tryOpen(['open', 'hermes://open/'])
     if (deeplink.ok) return { ok: true, method: 'deeplink' }
     const app = await tryOpen(['open', '-a', 'Hermes'])
@@ -63,7 +79,7 @@ export class HermesBridgeService extends TypertRemoteService {
     return {
       ok: false,
       method: 'app',
-      errorMessage: app.errorMessage || deeplink.errorMessage || '无法打开 Hermes Desktop',
+      errorMessage: '找不到 Hermes 原生对话区。请运行 hermes dashboard，或打开 Hermes Desktop。',
     }
   }
 
@@ -247,6 +263,7 @@ function extractText(item: Record<string, unknown>): string {
 const prototype = HermesBridgeService.prototype as unknown as Record<string, (...args: never[]) => Promise<unknown>>
 for (const name of [
   'ping',
+  'getNativeChatTarget',
   'openNativeChat',
   'getConnectionStatus',
   'saveConnectionConfig',

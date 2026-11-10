@@ -1,6 +1,6 @@
 # Hermes Workspace
 
-> 当前阶段：**DSH 侧边栏只作为 Hermes Desktop 原生 Bot 入口**
+> 当前阶段：**DSH 侧边栏打开 Hermes 官方 dashboard `/chat`**
 > 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`
 
 DSH 原生双端插件：在左侧功能栏提供独立 Hermes 工作区，连接本机或经 SSH 隧道访问的 Hermes Agent API。插件不实现 Agent 能力，只负责连接、消息转换、状态呈现和交互控制。
@@ -22,9 +22,9 @@ P0 可用版本：用户能从 DSH 左侧进入 Hermes 工作区，配置连接�
 
 - 更新时间：2026-11-10
 - 适用版本：`@jackdu/dsh-hermes-workspace@0.1.0`，宿主 DSH `0.2.2-rc.1`，profile `desktop`
-- 当前阶段：侧边栏 Hermes 点击后打开 Hermes Desktop 原生聊天区
-- 已完成：`open hermes://open/`，失败则 `open -a Hermes`
-- 不做：插件内不再自建会话列表、消息流或发送框
+- 当前阶段：侧边栏 Hermes 显示官方 `hermes dashboard` 的 `/chat`（内嵌 TUI）
+- 已完成：发现本机带 SPA 的 dashboard（当前常见 `127.0.0.1:58559`），主面板直接打开 `/chat`
+- 不做：不自建聊天 UI；不把 headless `hermes serve`（SSH 动态端口）当成网页对话区
 
 ## 架构边界
 

@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react'
+import { useEffect, useState, type CSSProperties, type ReactElement } from 'react'
 import { PACKAGE_NAME, PANEL_ID, REMOTE_NAMESPACE } from '../shared/constants'
-import type { OpenNativeResult } from '../shared/dto'
+import type { NativeChatTarget, OpenNativeResult } from '../shared/dto'
 
 type RemoteResult<T> = { ok: true; value: T } | { ok: false; error: unknown }
 
 type HermesRemote = {
+  getNativeChatTarget: (signal?: AbortSignal) => Promise<RemoteResult<NativeChatTarget>>
   openNativeChat: (signal?: AbortSignal) => Promise<RemoteResult<OpenNativeResult>>
 }
 
@@ -45,7 +46,7 @@ function remoteMethod(method: string) {
 
 const TYPERT_REMOTE = {
   package: PACKAGE_NAME,
-  descriptors: [remoteMethod('openNativeChat')],
+  descriptors: [remoteMethod('getNativeChatTarget'), remoteMethod('openNativeChat')],
 }
 
 const inject = ['slots', 'layout', 'remote']
@@ -68,6 +69,10 @@ function unwrap<T>(result: RemoteResult<T>): T {
 function registerWorkspace(ctx: SlotCtx) {
   const remote = ctx.remote.hermesWorkspace
   const api = {
+    getNativeChatTarget: async () => {
+      if (!remote?.getNativeChatTarget) throw new Error('Hermes Workspace 服务尚未就绪')
+      return unwrap(await remote.getNativeChatTarget())
+    },
     openNativeChat: async () => {
       if (!remote?.openNativeChat) throw new Error('Hermes Workspace 服务尚未就绪')
       return unwrap(await remote.openNativeChat())
@@ -76,7 +81,7 @@ function registerWorkspace(ctx: SlotCtx) {
   ctx.slots.inject('main', () =>
     ctx.slots.register(
       { name: 'main', key: PANEL_ID, inject: () => ({ api }) },
-      HermesEntryPanel,
+      HermesChatPanel,
     ),
   )
   ctx.slots.inject('sidebar.panellist', () =>
@@ -97,56 +102,69 @@ function HermesIcon(props: { size?: number; active?: boolean }) {
   )
 }
 
-function HermesEntryPanel(props: { api?: { openNativeChat: () => Promise<OpenNativeResult> } }) {
+function HermesChatPanel(props: {
+  api?: {
+    getNativeChatTarget: () => Promise<NativeChatTarget>
+    openNativeChat: () => Promise<OpenNativeResult>
+  }
+}) {
   const api = props.api
-  const opened = useRef(false)
-  const [status, setStatus] = useState('正在打开 Hermes Desktop…')
+  const [target, setTarget] = useState<NativeChatTarget | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  async function openNative() {
+  async function refresh() {
     if (!api) {
       setError('Remote API 未注入')
       return
     }
-    setError(null)
-    setStatus('正在打开 Hermes Desktop…')
     try {
-      const result = await api.openNativeChat()
-      if (result.ok) {
-        setStatus('已打开 Hermes 原生 Bot 聊天区。继续在 Desktop 里使用即可。')
-      } else {
-        setError(result.errorMessage || '无法打开 Hermes Desktop')
-      }
+      const next = await api.getNativeChatTarget()
+      setTarget(next)
+      setError(next.available ? null : next.errorMessage || '未找到 Hermes dashboard')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
   }
 
   useEffect(() => {
-    if (opened.current) return
-    opened.current = true
-    void openNative()
+    void refresh()
   }, [api])
+
+  if (target?.available && target.url) {
+    return (
+      <iframe
+        title="Hermes native chat"
+        src={target.url}
+        style={frameStyle}
+        allow="clipboard-read; clipboard-write"
+      />
+    )
+  }
 
   return (
     <div style={pageStyle}>
       <div style={kickerStyle}>Hermes</div>
-      <h1 style={titleStyle}>原生 Bot 入口</h1>
-      <p style={bodyStyle}>{status}</p>
-      {error ? <p style={errorStyle}>{error}</p> : null}
-      <button type="button" style={buttonStyle} onClick={() => void openNative()}>再次打开 Hermes Desktop</button>
-      <p style={mutedStyle}>聊天、工具、记忆和流式输出都在 Hermes Desktop 里，DSH 侧边栏只负责进入。</p>
+      <h1 style={titleStyle}>原生 Bot 对话区</h1>
+      <p style={bodyStyle}>
+        官方网页对话区是 `hermes dashboard` 的 `/chat`（内嵌 TUI）。当前 SSH 后端是 headless `hermes serve`，没有这套 UI。
+      </p>
+      {error ? <p style={errorStyle}>{error}</p> : <p style={mutedStyle}>正在查找本机 dashboard…</p>}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button type="button" style={buttonStyle} onClick={() => void refresh()}>重新查找</button>
+        <button type="button" style={buttonStyle} onClick={() => void api?.openNativeChat()}>在浏览器打开</button>
+      </div>
     </div>
   )
 }
 
+const frameStyle: CSSProperties = { width: '100%', height: '100%', border: 'none', background: 'var(--dsw-alias-bg-primary)' }
 const pageStyle: CSSProperties = {
   display: 'flex', flexDirection: 'column', gap: 12, height: '100%', padding: 32,
   boxSizing: 'border-box', background: 'var(--dsw-alias-bg-primary)', color: 'var(--dsw-alias-label-primary)',
 }
 const kickerStyle: CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', letterSpacing: '0.04em', textTransform: 'uppercase' }
 const titleStyle: CSSProperties = { margin: 0, fontSize: 22, fontWeight: 600 }
-const bodyStyle: CSSProperties = { margin: 0, maxWidth: 560, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary)' }
+const bodyStyle: CSSProperties = { margin: 0, maxWidth: 640, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary)' }
 const mutedStyle: CSSProperties = { margin: 0, color: 'var(--dsw-alias-label-secondary)', fontSize: 12 }
 const errorStyle: CSSProperties = { margin: 0, color: 'var(--dsw-alias-label-danger, #c0392b)' }
 const buttonStyle: CSSProperties = {

@@ -37,7 +37,14 @@ export interface PingResult {
 
 export interface OpenNativeResult {
   ok: boolean
-  method: 'deeplink' | 'app'
+  method: 'deeplink' | 'app' | 'dashboard'
+  errorMessage?: string
+}
+
+export interface NativeChatTarget {
+  available: boolean
+  url?: string
+  version?: string
   errorMessage?: string
 }
 
