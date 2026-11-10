@@ -1,11 +1,9 @@
-import { spawn, type ChildProcess } from 'node:child_process'
-import net from 'node:net'
+import { spawn } from 'node:child_process'
 import type { GatewayEvent, GatewayState, GatewayStatus } from '../shared/dto'
 
-export interface SshTarget {
-  host: string
-  port: number
-  user: string
+export interface GatewayTarget {
+  /** 本机 Hermes profile 名，对应 `hermes --profile <name>`。 */
+  profile: string
 }
 
 interface AttachInfo {
@@ -16,15 +14,17 @@ interface AttachInfo {
   ws_url: string
 }
 
-/** 远端只读 helper：credential-free discovery + 一次性 ticket + WS 目标拼装。ticket 不出本机 Host 内存。 */
+/** 本机只读 helper：discovery + 一次性 ticket + WS 目标拼装。ticket 不出本机 Host 内存。 */
 const PY_HELPER = `import sys, os, json, types, subprocess
 sys.path.insert(0, os.path.expanduser("~/.hermes/hermes-agent"))
 os.environ["HERMES_HOME"] = os.path.expanduser("~/.hermes")
 from hermes_cli import gateway_client
 from hermes_cli.gateway_runtime import gateway_profile_home
 from hermes_constants import get_hermes_home
+profile = os.environ.get("HERMES_DSH_PROFILE") or "default"
 v = json.loads(subprocess.check_output(
-    [os.path.expanduser("~/.local/bin/hermes"), "gateway", "ensure", "--json"], text=True, timeout=30))
+    [sys.executable, "-m", "hermes_cli.main", "--profile", profile, "gateway", "ensure", "--json"],
+    text=True, timeout=30, stderr=subprocess.DEVNULL))
 if v.get("state") != "ready" or not (v.get("endpoint") or {}).get("api_origin"):
     raise SystemExit("gateway not ready: " + str(v.get("reason_code")))
 ep_raw = v["endpoint"]
@@ -37,28 +37,22 @@ print(json.dumps({"api_origin": ep.api_origin, "ticket": ticket,
                   "instance_id": ep.instance_id, "profile_id": ep.profile_id, "ws_url": url}))
 `
 
-const REMOTE_CMD = [
+/** 本机 Hermes 自带 python 的定位顺序：venv → tools 下的解释器。 */
+const LOCAL_CMD = [
   'VENV=$(ls -d ~/.hermes/installs/*/environments/*/venv 2>/dev/null | head -1)',
   'PYBIN="${VENV:+$VENV/bin/python}"',
   'if [ -z "$PYBIN" ]; then PYBIN=$(ls -d ~/.hermes/tools/python-*/bin/python3 2>/dev/null | head -1); fi',
+  'if [ -z "$PYBIN" ]; then echo "未找到 Hermes 自带的 python 解释器" >&2; exit 1; fi',
+  'export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"',
+  'export PYTHONPATH="$HERMES_HOME/hermes-agent${PYTHONPATH:+:$PYTHONPATH}"',
   '"$PYBIN" - <<\'PY\'',
   PY_HELPER,
   'PY',
 ].join('\n') + '\n'
 
-function sshArgs(target: SshTarget): string[] {
-  return [
-    '-o', 'BatchMode=yes',
-    '-o', 'ConnectTimeout=6',
-    '-o', 'StrictHostKeyChecking=no',
-    '-p', String(target.port),
-    `${target.user}@${target.host}`,
-  ]
-}
-
-function sshExec(target: SshTarget, command: string): Promise<string> {
+function localExec(command: string, env: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn('ssh', [...sshArgs(target), command], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('bash', ['-lc', command], { stdio: ['ignore', 'pipe', 'pipe'], env })
     let out = ''
     let err = ''
     child.stdout.on('data', chunk => { out += chunk })
@@ -66,40 +60,17 @@ function sshExec(target: SshTarget, command: string): Promise<string> {
     child.once('error', error => reject(error))
     child.once('close', code => {
       if (code === 0) resolve(out.trim())
-      else reject(new Error(err.trim() || `ssh 退出码 ${code}`))
+      else reject(new Error(err.trim().split('\n').pop() || `本地 helper 退出码 ${code}`))
     })
   })
 }
 
-async function freePort(): Promise<number> {
-  const server = net.createServer()
-  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-  const address = server.address()
-  const port = typeof address === 'object' && address ? address.port : 0
-  await new Promise<void>(resolve => server.close(() => resolve()))
-  return port
-}
-
-async function waitTunnel(port: number): Promise<boolean> {
-  for (let attempt = 0; attempt < 30; attempt++) {
-    const ok = await new Promise<boolean>(resolve => {
-      const socket = net.connect(port, '127.0.0.1')
-      socket.once('connect', () => { socket.destroy(); resolve(true) })
-      socket.once('error', () => resolve(false))
-    })
-    if (ok) return true
-    await new Promise(resolve => setTimeout(resolve, 100))
-  }
-  return false
-}
-
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void }
 
-/** DSH Host 侧的 Gateway Protocol Adapter：SSH 通道 + Node 内置 WebSocket + JSON-RPC。 */
+/** DSH Host 侧的 Gateway Protocol Adapter：本机直连 + Node 内置 WebSocket + JSON-RPC。 */
 export class GatewayTransport {
-  private readonly target: SshTarget
+  private readonly target: GatewayTarget
   private ws: WebSocket | null = null
-  private tunnel: ChildProcess | null = null
   private readonly pending = new Map<number, Pending>()
   private events: GatewayEvent[] = []
   private seq = 0
@@ -107,7 +78,7 @@ export class GatewayTransport {
   private lastError?: string
   private info?: AttachInfo
 
-  constructor(target: SshTarget) {
+  constructor(target: GatewayTarget) {
     this.target = target
   }
 
@@ -122,30 +93,39 @@ export class GatewayTransport {
     }
   }
 
+  private connecting?: Promise<void>
+  private lastAttemptAt = 0
+
+  /** Hermes gateway 每次重启都会换端口（`gateway ensure` 返回新地址），
+   *  连接断了以后必须能自己恢复，否则面板会一直停在「连接失败」、
+   *  只能靠重启整个 DSH 才能好。这里做节流的自动重连：
+   *  - 已在线或正在连：直接复用；
+   *  - 两次尝试之间至少间隔 minIntervalMs，避免面板 1.5s 轮询打爆 helper 进程。 */
+  ensureConnected(minIntervalMs = 4000): Promise<void> | undefined {
+    if (this.state === 'online') return undefined
+    if (this.connecting) return this.connecting
+    const now = Date.now()
+    if (now - this.lastAttemptAt < minIntervalMs) return undefined
+    this.lastAttemptAt = now
+    this.connecting = this.connect()
+      .catch(() => undefined)
+      .finally(() => {
+        this.connecting = undefined
+      })
+    return this.connecting
+  }
+
   async connect(): Promise<void> {
     this.state = 'connecting'
     this.release()
     try {
-      const raw = await sshExec(this.target, REMOTE_CMD)
+      const raw = await localExec(LOCAL_CMD, { ...process.env, HERMES_DSH_PROFILE: this.target.profile })
       const line = raw.split('\n').filter(Boolean).pop()
-      if (!line) throw new Error('远端 attach helper 没有返回数据')
+      if (!line) throw new Error('本机 attach helper 没有返回数据')
       this.info = JSON.parse(line) as AttachInfo
+      if (!this.info.ws_url) throw new Error('未获取到 Gateway WebSocket 地址')
 
-      const remotePort = Number(new URL(this.info.api_origin).port)
-      const localPort = await freePort()
-      const tunnel = spawn('ssh', [
-        ...sshArgs(this.target),
-        '-o', 'ExitOnForwardFailure=yes',
-        '-N', '-L', `${localPort}:127.0.0.1:${remotePort}`,
-      ], { stdio: 'ignore' })
-      this.tunnel = tunnel
-      tunnel.once('error', error => {
-        this.lastError = `SSH 隧道异常: ${error.message}`
-        this.state = 'error'
-      })
-      if (!await waitTunnel(localPort)) throw new Error('SSH 端口转发未就绪')
-
-      const ws = new WebSocket(`ws://127.0.0.1:${localPort}/api/ws`, [
+      const ws = new WebSocket(this.info.ws_url, [
         'hermes-gateway-v1',
         `hermes-gateway-ticket.${this.info.ticket}`,
       ])
@@ -153,7 +133,7 @@ export class GatewayTransport {
       this.bindMessages(ws)
       await new Promise<void>((resolve, reject) => {
         ws.onopen = () => resolve()
-        ws.onerror = () => reject(new Error('Gateway WebSocket 握手失败'))
+        ws.onerror = () => reject(new Error(`Gateway WebSocket 握手失败（${this.info?.ws_url}）`))
       })
       if (ws.protocol !== 'hermes-gateway-v1') {
         throw new Error(`Gateway 协议不匹配: ${ws.protocol}`)
@@ -220,7 +200,6 @@ export class GatewayTransport {
         this.state = 'disconnected'
         this.ws = null
         this.rejectPending(new Error('Gateway 连接已断开'))
-        this.releaseTunnel()
       }
     }
   }
@@ -230,19 +209,11 @@ export class GatewayTransport {
     this.pending.clear()
   }
 
-  private releaseTunnel(): void {
-    if (this.tunnel) {
-      this.tunnel.kill()
-      this.tunnel = null
-    }
-  }
-
   private release(): void {
     const ws = this.ws
     this.ws = null
     if (ws && ws.readyState === WebSocket.OPEN) ws.close()
     this.rejectPending(new Error('Gateway 连接已重置'))
-    this.releaseTunnel()
   }
 
   private async ensureOpen(): Promise<WebSocket> {

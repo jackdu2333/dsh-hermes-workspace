@@ -6,6 +6,8 @@ export interface GatewayStatus {
   instanceId?: string
   profileId?: string
   apiOrigin?: string
+  /** 本地反代 origin：iframe 用它加载 Hermes 原生 Dashboard（已注入 dashboard token）。 */
+  dashboardOrigin?: string
   errorMessage?: string
   checkedAt: number
 }
@@ -24,6 +26,8 @@ export interface BotProfile {
   isDefault: boolean
   model: string
   description: string
+  /** Bot 模式里给这个助手配的主色（ui_meta.hermes-bots.color），用于头像着色。 */
+  color?: string
   canonicalSessionId?: string
 }
 
@@ -37,6 +41,8 @@ export interface ChatMessage {
   id: string
   role: string
   text: string
+  /** role=tool 时的工具名（gateway 行上的 tool_name），用于渲染工具胶囊。 */
+  toolName?: string
   timestamp?: string
 }
 
