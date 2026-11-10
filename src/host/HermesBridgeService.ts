@@ -67,6 +67,27 @@ export const Config = Schema.object({
   profile: Schema.string().default('default').description('本机 Hermes profile 名'),
 })
 
+/** 流式渲染只关心这几类事件。`sessions.changed` / `platforms.changed` / `heartbeat` 是高频广播，
+ *  在 180ms 的流式轮询下会把通道塞满、把真正的 delta 挤掉。 */
+const STREAM_EVENT_TYPES = new Set([
+  'message.start',
+  'message.delta',
+  'message.interim',
+  'message.complete',
+  'thinking.delta',
+  'reasoning.delta',
+  'reasoning.available',
+  'tool.start',
+  'tool.complete',
+  'tool.generating',
+  'tool.progress',
+  'agent.step',
+  'session.usage',
+  'session.info',
+  'error',
+  'unsupported_request',
+])
+
 /** 把 Gateway 的 content（字符串或结构化 parts）收敛成展示文本。 */
 function extractText(content: unknown): string {
   if (typeof content === 'string') return content
@@ -332,7 +353,8 @@ export class HermesBridgeService extends TypertRemoteService {
 
   /** 事件按连接隔离，必须读当前 Bot 那条，否则会把别的 profile 的事件混进来。 */
   async getEvents(request?: { profile?: string }): Promise<EventsPage> {
-    return { events: this.transportFor(request?.profile).drainEvents() }
+    const events = this.transportFor(request?.profile).drainEvents()
+    return { events: events.filter(event => STREAM_EVENT_TYPES.has(String(event.type))) }
   }
 }
 

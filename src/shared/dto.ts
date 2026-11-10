@@ -73,11 +73,15 @@ export interface InterruptResult {
   errorMessage?: string
 }
 
-/** Gateway 推来的 event 帧，只保留展示需要的字段。 */
+/** Gateway 推来的 event 帧，只保留展示需要的字段。
+ *  `payload` 的结构随 type 变化（契约见 gateway 的 contracts/events.py）：
+ *  - message.delta: { text: string|null, turn_id, segment, offset }
+ *  - tool.start / tool.complete: { tool_id, name, summary, ... }
+ *  - message.complete: { text, outcome, usage } */
 export interface GatewayEvent {
   type: string
   sessionId?: string
-  detail?: string
+  payload?: Record<string, unknown>
   [key: string]: unknown
 }
 

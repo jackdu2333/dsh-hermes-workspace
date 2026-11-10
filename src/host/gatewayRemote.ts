@@ -170,7 +170,8 @@ export class GatewayTransport {
       if (frame.method === 'event') {
         const params = (frame.params ?? {}) as GatewayEvent
         this.events.push(params)
-        if (this.events.length > 500) this.events = this.events.slice(-500)
+        // 流式时 message.delta 是逐 token 来的，500 条在长回答里会被顶掉。
+        if (this.events.length > 2000) this.events = this.events.slice(-2000)
         return
       }
       // Gateway 主动发起的请求（approval / clarify 等）：P0 不提供交互 UI，

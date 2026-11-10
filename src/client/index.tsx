@@ -240,6 +240,28 @@ function tint(color: string | undefined, percent: number): string | undefined {
   return `color-mix(in srgb, ${color} ${percent}%, transparent)`
 }
 
+/** 流式草稿块：文本段与工具调用按到达顺序排，和最终历史里的顺序一致。
+ *  gateway 用 segment boundary（`message.delta` 的 text=null）切开旁白，
+ *  所以同一段内的 chunk 要追加到同一个 block，不能每片都新建气泡。 */
+type LiveTextBlock = { kind: 'text'; text: string }
+type LiveToolBlock = {
+  kind: 'tool'
+  id: string
+  name: string
+  status: 'running' | 'done' | 'failed'
+  summary?: string
+}
+type LiveState = {
+  active: boolean
+  blocks: Array<LiveTextBlock | LiveToolBlock>
+  /** segment 号 → 它对应的 text block 下标。 */
+  segmentBlock: Map<number, number>
+}
+
+function emptyLive(): LiveState {
+  return { active: false, blocks: [], segmentBlock: new Map() }
+}
+
 type PanelApi = {
   getConnectionStatus: (request?: { profile?: string }) => Promise<GatewayStatus>
   getBotRoster: () => Promise<BotRoster>
@@ -283,10 +305,14 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
   const sessionRef = useRef<string | null>(null)
   const profileRef = useRef<string | null>(null)
   const generationRef = useRef<number | undefined>(undefined)
-  const lastRefreshRef = useRef(0)
   const previousState = useRef<GatewayStatus['state']>('disconnected')
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  /** 流式草稿放 ref 里累积：每个 delta 都 setState 会把 React 打爆，
+   *  bumpLive 只负责在批量应用后触发一次重绘。 */
+  const liveRef = useRef<LiveState>(emptyLive())
+  const [liveVersion, setLiveVersion] = useState(0)
+  const liveStartedAt = useRef(0)
   /** 只有视口贴底时才跟随新消息；用户往上翻历史时不再强行拽回底部。 */
   const stickToBottom = useRef(true)
 
@@ -303,6 +329,127 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
   /** 刷新历史 / 事件都要落在当前 Bot 自己那条连接上。 */
   function currentProfile(): string | undefined {
     return profileRef.current ?? undefined
+  }
+
+  function resetLive(): void {
+    liveRef.current = emptyLive()
+    liveStartedAt.current = 0
+    setLiveVersion(value => value + 1)
+  }
+
+  /** 把一批 gateway 事件折进流式草稿。
+   *  `message.delta` 按 segment 分段到达，`offset` 是该 chunk 在段落内的起点：
+   *  offset 落在已应用区间里说明是重发的帧（重连后 gateway 会重放），跳过即可。 */
+  function applyEvents(incoming: GatewayEvent[]): void {
+    const live = liveRef.current
+    let changed = false
+    let completed = false
+    for (const event of incoming) {
+      const payload = (event.payload ?? {}) as Record<string, unknown>
+      switch (event.type) {
+        case 'message.start': {
+          if (!live.active) {
+            live.blocks = []
+            live.segmentBlock.clear()
+          }
+          live.active = true
+          if (!liveStartedAt.current) liveStartedAt.current = Date.now()
+          changed = true
+          break
+        }
+        case 'message.delta': {
+          const chunk = payload.text
+          if (chunk === null || chunk === undefined) {
+            // 段落边界：后续 delta 会开一个新 block
+            if (typeof payload.segment === 'number') live.segmentBlock.delete(payload.segment)
+            break
+          }
+          const segment = typeof payload.segment === 'number' ? payload.segment : 0
+          const offset = typeof payload.offset === 'number' ? payload.offset : -1
+          let index = live.segmentBlock.get(segment)
+          if (index === undefined) {
+            live.blocks.push({ kind: 'text', text: '' })
+            index = live.blocks.length - 1
+            live.segmentBlock.set(segment, index)
+          }
+          const block = live.blocks[index]
+          if (block?.kind === 'text') {
+            const text = String(chunk)
+            if (offset < 0 || offset >= block.text.length) block.text += text
+          }
+          live.active = true
+          if (!liveStartedAt.current) liveStartedAt.current = Date.now()
+          changed = true
+          break
+        }
+        case 'message.interim': {
+          const text = typeof payload.text === 'string' ? payload.text : ''
+          if (payload.already_streamed !== true && text) {
+            live.blocks.push({ kind: 'text', text })
+            changed = true
+          }
+          // 旁白封版：后面的输出属于新的一段，不能续写到这里。
+          live.segmentBlock.clear()
+          live.active = true
+          break
+        }
+        case 'tool.start': {
+          const id = String(payload.tool_id ?? payload.name ?? `tool-${live.blocks.length}`)
+          live.blocks.push({
+            kind: 'tool',
+            id,
+            name: String(payload.name ?? '工具调用'),
+            status: 'running',
+          })
+          // gateway 可能复用同一个 segment 号，工具后的文本必须另起一块，
+          // 否则会接在调用前的旁白末尾（真机验证时踩到过）。
+          live.segmentBlock.clear()
+          live.active = true
+          if (!liveStartedAt.current) liveStartedAt.current = Date.now()
+          changed = true
+          break
+        }
+        case 'tool.complete': {
+          const id = String(payload.tool_id ?? '')
+          const summary = typeof payload.summary === 'string' && payload.summary ? payload.summary : undefined
+          const block = live.blocks.find(item => item.kind === 'tool' && item.id === id)
+          if (block && block.kind === 'tool') {
+            block.status = 'done'
+            if (summary) block.summary = summary
+          } else {
+            live.blocks.push({
+              kind: 'tool',
+              id,
+              name: String(payload.name ?? '工具调用'),
+              status: 'done',
+              summary,
+            })
+          }
+          changed = true
+          break
+        }
+        case 'message.complete': {
+          // 先停光标、保留草稿，等历史刷新拿到真消息后再收起来，避免中间闪空。
+          live.active = false
+          completed = true
+          changed = true
+          break
+        }
+        case 'session.info': {
+          // 兜底：complete 帧断线时可能丢，running 变 false 同样代表这一轮结束。
+          if (payload.running === false && live.active) {
+            live.active = false
+            completed = true
+            changed = true
+          }
+          break
+        }
+        default:
+          break
+      }
+    }
+    if (changed) setLiveVersion(value => value + 1)
+    if (completed) void refreshHistory().then(() => resetLive())
   }
 
   async function refreshHistory(): Promise<void> {
@@ -335,6 +482,8 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
     setPendingProfile(row.name)
     setError(null)
     try {
+      // 切 Bot 时把上一轮的草稿丢掉，否则会串到另一个会话里。
+      resetLive()
       applyResume(await api.openBot({ profile: row.name }), row.name)
       stickToBottom.current = true
     } catch (cause) {
@@ -346,18 +495,25 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
   }
 
   async function send(): Promise<void> {
-    if (!api || !sessionId || !draft.trim()) return
+    const text = draft.trim()
+    if (!api || !sessionId || !text) return
     setBusy(true)
     setError(null)
     stickToBottom.current = true
     try {
-      const result = await api.submitPrompt({ sessionId, text: draft.trim(), profile: currentProfile() })
-      if (!result.accepted) setError(result.errorMessage ?? '消息未被接受')
-      else {
-        setDraft('')
-        // prompt.submit 是 fire-and-forget，回复由事件通知；延迟拉一次历史把新消息显示出来。
-        window.setTimeout(() => void refreshHistory(), 1800)
+      const result = await api.submitPrompt({ sessionId, text, profile: currentProfile() })
+      if (!result.accepted) {
+        setError(result.errorMessage ?? '消息未被接受')
+        return
       }
+      setDraft('')
+      // 乐观插入：submit 是 fire-and-forget，不等历史回来就让用户看到自己发出去的那条。
+      setMessages(previous => [...previous, { id: `pending-${Date.now()}`, role: 'user', text }])
+      // 立刻进入流式等待：事件一到就有草稿区可落笔，中间不再空 1.8 秒。
+      liveRef.current = emptyLive()
+      liveRef.current.active = true
+      liveStartedAt.current = Date.now()
+      setLiveVersion(value => value + 1)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -374,7 +530,12 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
     try {
       const result = await api.submitPrompt({ sessionId, text: text.trim(), profile: currentProfile() })
       if (!result.accepted) setError(result.errorMessage ?? '重发失败')
-      else window.setTimeout(() => void refreshHistory(), 1800)
+      else {
+        liveRef.current = emptyLive()
+        liveRef.current.active = true
+        liveStartedAt.current = Date.now()
+        setLiveVersion(value => value + 1)
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -392,7 +553,11 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
         profile: currentProfile(),
       })
       if (!result.accepted) setError(result.errorMessage ?? '中断失败')
-      else window.setTimeout(() => void refreshHistory(), 800)
+      else {
+        liveRef.current.active = false
+        setLiveVersion(value => value + 1)
+        window.setTimeout(() => void refreshHistory(), 600)
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -403,6 +568,8 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
   useEffect(() => {
     if (!api) return
     let cancelled = false
+    let timer: number | undefined
+    let lastStatusAt = 0
     void (async () => {
       try {
         await loadRoster()
@@ -410,9 +577,12 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause))
       }
     })()
-    const timer = setInterval(() => {
-      void (async () => {
-        try {
+    const tick = async (): Promise<void> => {
+      if (cancelled) return
+      try {
+        // 状态灯不跟着流式节奏跑，1.2 秒一次足够，免得每 160ms 都走一遍 discovery。
+        if (Date.now() - lastStatusAt > 1200) {
+          lastStatusAt = Date.now()
           const next = await api.getConnectionStatus({ profile: currentProfile() })
           if (cancelled) return
           setStatus(next)
@@ -425,33 +595,34 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
             })
             if (!cancelled) applyResume(resumed, profileRef.current ?? '')
           }
-          const page = await api.getEvents({ profile: currentProfile() })
-          if (!cancelled && page.events.length) {
-            setEvents(previous => [...previous, ...page.events].slice(-12))
-            // 收到对话/工具/turn 事件时刷新历史，让 DSH 与 Desktop 看到同一条消息。
-            const hasChatEvent = page.events.some(item => /message|turn|prompt|tool|assistant|complete/i.test(String(item.type)))
-            if (hasChatEvent && sessionRef.current && Date.now() - lastRefreshRef.current > 2500) {
-              lastRefreshRef.current = Date.now()
-              const resumed = await api.resumeSession({
-                sessionId: sessionRef.current,
-                profile: currentProfile(),
-              })
-              if (!cancelled) applyResume(resumed, profileRef.current ?? '')
-            }
-          }
-        } catch {
-          // 轮询失败时保留上一次状态，不打断界面
         }
-      })()
-    }, 1500)
-    return () => { cancelled = true; clearInterval(timer) }
+        const page = await api.getEvents({ profile: currentProfile() })
+        if (!cancelled && page.events.length) {
+          setEvents(previous => [...previous, ...page.events].slice(-40))
+          applyEvents(page.events)
+        }
+        // 兜底：complete 帧在断线时可能丢，超过 12 秒没有收尾就把历史对齐一次。
+        if (liveRef.current.active && liveStartedAt.current && Date.now() - liveStartedAt.current > 12000) {
+          liveStartedAt.current = Date.now()
+          await refreshHistory()
+        }
+      } catch {
+        // 轮询失败时保留上一次状态，不打断界面
+      }
+      if (!cancelled) {
+        // 有草稿在长（流式）时拉密一点，空闲时退回 1.2s。
+        timer = window.setTimeout(() => void tick(), liveRef.current.active ? 160 : 1200)
+      }
+    }
+    void tick()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
   }, [api])
 
   // 新消息到达后贴住底部，和原生聊天一致；用户主动上翻时不打扰。
   useEffect(() => {
     const el = scrollRef.current
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight
-  }, [messages.length, sessionId, busy])
+  }, [messages.length, sessionId, liveVersion])
 
   // 输入框随内容自动增高，最多长到 132px 再内部滚动。
   useEffect(() => {
@@ -489,6 +660,9 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
       blocks.push({ key: message.id, message })
     }
   }
+
+  // 草稿数据存在 ref 里避免每帧克隆，liveVersion 只承担「触发重绘」的职责。
+  void liveVersion
 
   return (
     <div style={pageStyle}>
@@ -633,12 +807,7 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
                   />
                 ) : null,
               )}
-              {busy ? (
-                <div style={typingRowStyle}>
-                  <span className="hw-typing" style={typingDotsStyle}><span /><span /><span /></span>
-                  <span style={typingTextStyle}>Hermes 正在处理</span>
-                </div>
-              ) : null}
+              <LiveTurn live={liveRef.current} />
             </div>
 
             <div style={composerStyle} className="hw-composer">
@@ -674,6 +843,41 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
           </>
         ) : null}
       </section>
+    </div>
+  )
+}
+
+/** 流式草稿区：文字段与工具行按到达顺序排，末尾带闪烁光标。
+ *  只在这一轮还没落库时显示；message.complete 之后由真实历史接管。 */
+function LiveTurn({ live }: { live: LiveState }) {
+  if (!live.active && live.blocks.length === 0) return null
+  const lastIndex = live.blocks.length - 1
+  return (
+    <div style={liveWrapStyle}>
+      {live.blocks.map((block, index) =>
+        block.kind === 'text' ? (
+          <div key={index} className="hw-md" style={assistantTextStyle}>
+            <MarkdownBlock text={block.text} />
+            {live.active && index === lastIndex ? <span className="hw-caret" /> : null}
+          </div>
+        ) : (
+          <div key={index} style={liveToolRowStyle}>
+            <span
+              className={block.status === 'running' ? 'hw-live-dot' : undefined}
+              style={{ ...liveToolDotStyle, ...(block.status === 'running' ? liveToolDotRunStyle : {}) }}
+            />
+            <span style={toolNameStyle}>{block.name}</span>
+            {block.summary ? <span style={toolSummaryStyle}>{block.summary}</span> : null}
+            {block.status === 'running' ? <span style={liveToolStateStyle}>运行中</span> : null}
+          </div>
+        ),
+      )}
+      {live.active && live.blocks.length === 0 ? (
+        <div style={typingRowStyle}>
+          <span className="hw-typing" style={typingDotsStyle}><span /><span /><span /></span>
+          <span style={typingTextStyle}>Hermes 正在处理</span>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -971,6 +1175,9 @@ const PANEL_CSS = `
 .hw-typing span:nth-child(2){animation-delay:.15s}
 .hw-typing span:nth-child(3){animation-delay:.3s}
 @keyframes hw-pulse{0%,80%,100%{opacity:.22;transform:translateY(0)}40%{opacity:1;transform:translateY(-2px)}}
+.hw-caret{display:inline-block;width:2px;height:13px;margin-left:2px;border-radius:1px;background:currentColor;vertical-align:-2px;animation:hw-caret 1.05s steps(1,end) infinite}
+@keyframes hw-caret{0%,49%{opacity:1}50%,100%{opacity:0}}
+.hw-live-dot{animation:hw-pulse 1.1s infinite ease-in-out}
 `
 
 const pageStyle: CSSProperties = {
@@ -1211,6 +1418,22 @@ const typingRowStyle: CSSProperties = {
   display: 'flex', alignItems: 'center', gap: 8, paddingTop: 2,
   color: 'var(--dsw-alias-label-secondary)',
 }
+/** 流式草稿：和助手正文同样式，但整体左对齐、块之间留一点气口。 */
+const liveWrapStyle: CSSProperties = {
+  display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start', maxWidth: '100%',
+}
+const liveToolRowStyle: CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 8, padding: '4px 9px', borderRadius: 8,
+  background: 'color-mix(in srgb, var(--dsw-alias-label-primary) 3.5%, transparent)',
+  border: '1px solid color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent)',
+  fontSize: 11.5, maxWidth: '100%',
+}
+const liveToolDotStyle: CSSProperties = {
+  width: 5, height: 5, borderRadius: 999, flexShrink: 0,
+  background: 'var(--dsw-alias-label-success, #22a06b)',
+}
+const liveToolDotRunStyle: CSSProperties = { background: 'var(--dsw-alias-label-secondary)' }
+const liveToolStateStyle: CSSProperties = { fontSize: 10, opacity: 0.55, flexShrink: 0 }
 const typingDotsStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', paddingLeft: 2 }
 const typingTextStyle: CSSProperties = { fontSize: 11.5, opacity: 0.8 }
 /** 输入区是一个整块圆角盒子：输入区无边框，发送键在盒子内部右下，参考 AI 原生 composer。 */

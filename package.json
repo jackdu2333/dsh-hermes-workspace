@@ -1,6 +1,6 @@
 {
   "name": "@jackdu/dsh-hermes-workspace",
-  "version": "0.1.24",
+  "version": "0.1.26",
   "private": true,
   "description": "Native Hermes Bot workspace for DeepSeek Harness",
   "type": "module",

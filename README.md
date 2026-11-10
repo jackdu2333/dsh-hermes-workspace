@@ -2,7 +2,7 @@
 
 > **2026-11-10 现行决策**：见 [ADR-001](docs/ADR-001-gateway-protocol.md)——DSH 原生 UI 直连 Hermes TUI Gateway JSON-RPC；[P0-00](docs/P0-00-gateway-validation.md) 已执行完毕，UI 已实施。
 > 当前阶段：**Gateway Protocol Adapter 已在 DSH 中运行**；现行状态见下方「当前状态（现行）」，标题带「历史」的段落只作留痕。
-> 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`　版本：`0.1.24`
+> 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`　版本：`0.1.26`
 >
 > **0.1.4 起改为本机直连**：不再走 SSH / 端口转发，直接对接本机已运行的 Hermes gateway。
 > **0.1.17 起形态定案**：默认自建气泡对话；「终端」模式内嵌 Hermes TUI。原生桌面端 UI 无法 iframe（原因见「界面形态定案」）。
@@ -46,6 +46,42 @@
 | 显示名 | 取 `ui_meta["hermes-bots"].title`；`display_name` 是空的，所以 Delores / OB 笔记助手 都来自这里 |
 
 已验证：点第二个 Bot 能载入它自己的 27 条历史；用户手动发消息正常，执行步骤正常折叠显示。
+
+## 流式输出（2026-11-10 22:52，0.1.26）
+
+Gateway 的 WS 一直在推增量帧，只是之前被整段轮询盖住了。真实抓到的 turn：
+
+```
+message.start {}
+agent.step {iteration:1}
+thinking.delta {text:"( •_•)>⌐■-■ brainstorming..."}
+message.delta {text:"\n\n我是", turn_id, segment:0, offset:0}
+message.delta {text:"运行",  turn_id, segment:0, offset:4}
+message.delta {text:null}                      ← 段落边界
+tool.start {tool_id, name}
+tool.complete {tool_id, name, summary}
+message.complete {text, outcome, usage}
+```
+
+关键语义：
+
+| 字段 | 含义 | 用法 |
+|---|---|---|
+| `text: null` | segment boundary（工具调用前的收尾） | 关闭当前文本块，后续另起一段 |
+| `segment` | 段号 | 同段追加、异段新建 |
+| `offset` | 该 chunk 在段内的**起点**（UTF-16 码元） | `offset < 已累积长度` = 重发帧，丢弃 |
+| `turn_id` | 一次 turn 的标识 | 断线重放时判断是不是同一轮 |
+
+落地方案：
+
+- **Host**：`getEvents` 只放行流式相关事件（`message.*` / `tool.*` / `session.*` / `agent.step` / `error`）。`sessions.changed`、`platforms.changed` 是高频广播，在 160ms 轮询下会把 delta 挤掉。
+- **Client**：`applyEvents` 把帧折成 `blocks`（text / tool 按到达顺序）。草稿放 `ref` 里累积，`liveVersion` 只负责触发重绘，避免每片 delta 都 clone 状态。
+- **分段**：`tool.start` 和 `message.interim` 都会清空 `segment → block` 映射。gateway 可能复用同一个 segment 号，不清就会把工具后的文本接到调用前的旁白末尾（用例里真踩到了）。
+- **节奏**：有草稿时轮询 160ms，空闲退回 1.2s；状态灯单独 1.2s，不走流式节奏。
+- **收尾**：`message.complete` 停光标但保留草稿，等历史刷新拿到真消息后再收，避免中间闪空；`session.info` 的 `running:false` 作为 complete 丢帧时的兜底。
+- **乐观发送**：submit 成功后立即插入用户消息并进入流式等待，不再等 1.8 秒的历史刷新。
+
+验证：本地临时脚本 `dist/verify-stream.mjs`（与 `applyEvents` 同一套折叠逻辑，不入库）用真实帧序列 + 边界用例覆盖拼接、去重、分段、工具插入、interim 去重，7/7 通过。
 
 **待办**：模型选择器（`/api/model/set` 仅对新会话生效，运行中会话需终端 `/model`）、附件上传（`/api/chat/image-upload`）。
 
