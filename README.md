@@ -1,6 +1,6 @@
 # Hermes Workspace
 
-> 当前阶段：**工程初始化（P0-00 / P0-01 骨架）**
+> 当前阶段：**接入现有 Hermes Desktop SSH dashboard**
 > 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`
 
 DSH 原生双端插件：在左侧功能栏提供独立 Hermes 工作区，连接本机或经 SSH 隧道访问的 Hermes Agent API。插件不实现 Agent 能力，只负责连接、消息转换、状态呈现和交互控制。
@@ -21,15 +21,11 @@ P0 可用版本：用户能从 DSH 左侧进入 Hermes 工作区，配置连接�
 ## 当前状态
 
 - 更新时间：2026-11-10
-- 适用版本：`@jackdu/dsh-hermes-workspace@0.1.0`（提交 `2cce2f2`），宿主 DSH `0.2.2-rc.1`，profile `desktop`
-- 当前阶段：工程骨架已安装，**尚未完成会话/流式闭环**
-- 已完成且已验证：
-  - `plugin_manager install_bundle` → `application: applied`
-  - Client Slot `sidebar.panellist` occupant `hermes-workspace`（order 18）
-  - Client Slot `main` occupant `hermes-workspace`
-  - `pnpm typecheck` 与 `pnpm build` 通过
-- 未验证：工作区面板视觉（需你点左侧 Hermes 看一眼）、Host ping 的页面展示、真实 Hermes API / 凭据 / SSE / 会话 CRUD
-- 阻塞：本机 `127.0.0.1:18642` / `:8642` 当前无 Hermes API；SSH 隧道由用户手动维护
+- 适用版本：`@jackdu/dsh-hermes-workspace@0.1.0`，宿主 DSH `0.2.2-rc.1`，profile `desktop`
+- 当前阶段：已改为对接 **Hermes Desktop SSH dashboard `/api`**，不再使用 PRD 的 `8642` / `/v1/runs`
+- 已完成：连接配置、Credentials 存 token、`/api/health` 探测、会话列表、历史消息读取
+- 未验证：当前 SSH 跳板 `127.0.0.1:22222` 在本轮探测时已关闭，端到端需 Desktop 重新连上后再测
+- 不做：插件不管理 SSH；不接 `/v1/runs`；发送与流式输出下一刀再做
 
 ## 架构边界
 
@@ -59,22 +55,19 @@ pnpm build
 
 `lib/index.js` 是 Host 入口，`lib/client.js` 是 Web Client 入口。替换已安装包后需要重启 DSH 才能加载新的 JS 模块。
 
-## 连接（P0 约定，骨架尚未接线）
+## 连接（现有 Desktop SSH dashboard）
 
-Mac mini：
+本机 Hermes Desktop 已保存 SSH 连接：`jackdu@127.0.0.1:22222`，远端 `/Users/jackdu/.local/bin/hermes`。Desktop 会把远端 dashboard 转发到 **本机动态端口**（曾经是 `59585`，每次重连会变）。
 
-```bash
-hermes gateway
-# API_SERVER_HOST=127.0.0.1 API_SERVER_PORT=8642
-```
+在工作区填写：
 
-MacBook：
+1. Dashboard URL：`http://127.0.0.1:<Desktop 当前转发端口>`
+2. Session token：Hermes Desktop 该 SSH 连接的 dashboard token（Host 写入 DSH Credentials，记录 id `@jackdu/dsh-hermes-workspace/default-api-key`）
+3. Profile：默认 `default`
 
-```bash
-ssh -N -L 18642:127.0.0.1:8642 user@macmini
-```
+探测：`GET /api/health`（可无 token）→ `GET /api/auth/me` / `GET /api/sessions`（需要 `X-Hermes-Session-Token` 或 `Authorization: Bearer`）。
 
-Host 访问 `http://127.0.0.1:18642`，可选 Profile 前缀 `/p/<name>`。API Key 只存在 DSH Credentials，记录 id：`@jackdu/dsh-hermes-workspace/default-api-key`。
+插件不创建 SSH 隧道。Desktop 未连接时状态为 `offline`。
 
 ## 事实源与维护约定
 
@@ -93,6 +86,6 @@ Host 访问 `http://127.0.0.1:18642`，可选 Profile 前缀 `/p/<name>`。API K
 
 ## 下一步
 
-1. 在当前 profile 安装并确认左侧 Hermes 入口、独立主面板、Host ping。
-2. P0-02：HermesApiClient、凭据、Health / Capabilities、连接状态机。
-3. P0-03 / P0-04：会话、Run、SSE → Remote Stream、工作区 UI。
+1. Desktop 连上 SSH 后，在工作区填入当前转发 URL 和 token，确认会话列表。
+2. 发送消息：优先 `POST /api/sessions/{id}/chat` 或 Desktop WS；现有 OpenAPI 没有 `/v1/runs`。
+3. 流式输出另开一刀。

@@ -1,3 +1,7 @@
 - insert:
     - id: hermes-workspace
       name: '@jackdu/dsh-hermes-workspace'
+      config:
+        baseUrl: ''
+        displayName: Hermes
+        profile: default
