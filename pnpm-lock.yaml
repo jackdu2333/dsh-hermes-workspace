@@ -11,6 +11,9 @@ importers:
       '@deepseek-ai/dsh-typert-protocol':
         specifier: '*'
         version: 0.1.0-rc.6(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-invariants@0.1.0-rc.8(@deepseek-ai/cordis@4.1.0))
+      '@deepseek-ai/schemastery':
+        specifier: '*'
+        version: 3.19.0
     devDependencies:
       '@types/react':
         specifier: ^18.3.18

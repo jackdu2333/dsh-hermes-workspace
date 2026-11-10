@@ -22,9 +22,9 @@ P0 可用版本：用户能从 DSH 左侧进入 Hermes 工作区，配置连接�
 
 - 更新时间：2026-11-10
 - 适用版本：`@jackdu/dsh-hermes-workspace@0.1.0`，宿主 DSH `0.2.2-rc.1`，profile `desktop`
-- 当前阶段：已改为对接 **Hermes Desktop SSH dashboard `/api`**，不再使用 PRD 的 `8642` / `/v1/runs`
-- 已完成：连接配置、Credentials 存 token、`/api/health` 探测、会话列表、历史消息读取
-- 未验证：当前 SSH 跳板 `127.0.0.1:22222` 在本轮探测时已关闭，端到端需 Desktop 重新连上后再测
+- 当前阶段：对接 Hermes Desktop SSH dashboard `/api`
+- 已完成：Credentials 保存 URL/token、自动发现仍存活的本机转发端口、会话列表、历史消息
+- 未验证：`127.0.0.1:22222` 关闭时只能显示 offline，需 Desktop 重新连上后再测在线
 - 不做：插件不管理 SSH；不接 `/v1/runs`；发送与流式输出下一刀再做
 
 ## 架构边界

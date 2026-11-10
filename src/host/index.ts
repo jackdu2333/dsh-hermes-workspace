@@ -1,1 +1,1 @@
-export { HermesBridgeService as default, HermesBridgeService } from './HermesBridgeService'
+export { Config, HermesBridgeService as default, HermesBridgeService } from './HermesBridgeService'

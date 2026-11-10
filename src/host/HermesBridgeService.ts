@@ -1,3 +1,4 @@
+import Schema from '@deepseek-ai/schemastery'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { PACKAGE_NAME, PANEL_ID, REMOTE_NAMESPACE } from '../shared/constants'
 import type {
@@ -10,6 +11,7 @@ import type {
   SessionPage,
   SessionSummary,
 } from '../shared/dto'
+import { discoverHermesDesktop } from './discover'
 import { HermesApiClient, HermesHttpError } from './HermesApiClient'
 import { HermesCredentialStore } from './HermesCredentialStore'
 import { normalizeBaseUrl } from './url'
@@ -19,17 +21,27 @@ type HostContext = {
   effect: (callback: () => () => void, label?: string) => () => void
   get?: (name: string) => unknown
   credentials?: ConstructorParameters<typeof HermesCredentialStore>[0]
-  fiber?: { entry?: { config?: Record<string, unknown> } }
 }
+
+export const Config = Schema.object({
+  baseUrl: Schema.string().default('').description('Hermes dashboard URL，例如 http://127.0.0.1:59585'),
+  displayName: Schema.string().default('Hermes'),
+  profile: Schema.string().default('default'),
+})
 
 export class HermesBridgeService extends TypertRemoteService {
   static inject = ['credentials'] as const
+  static Config = Config
   private readonly credentials: HermesCredentialStore
-  private readonly host: HostContext
+  private readonly rowConfig: ConnectionConfig
 
-  constructor(ctx: HostContext) {
+  constructor(ctx: HostContext, config: Partial<ConnectionConfig> = {}) {
     super(ctx as never, REMOTE_NAMESPACE)
-    this.host = ctx
+    this.rowConfig = {
+      baseUrl: typeof config.baseUrl === 'string' ? config.baseUrl : '',
+      displayName: typeof config.displayName === 'string' && config.displayName.trim() ? config.displayName : 'Hermes',
+      profile: typeof config.profile === 'string' ? config.profile : 'default',
+    }
     this.credentials = new HermesCredentialStore(ctx.credentials ?? (ctx.get?.('credentials') as never))
     ctx.logger?.info?.('hermes-workspace: host bridge started')
     ctx.effect(() => () => {
@@ -42,7 +54,7 @@ export class HermesBridgeService extends TypertRemoteService {
   }
 
   async getConnectionStatus(): Promise<ConnectionStatus> {
-    const config = this.readConfig()
+    const config = await this.resolveConfig()
     const hasToken = await this.credentials.hasToken()
     if (!config.baseUrl) {
       return {
@@ -51,7 +63,7 @@ export class HermesBridgeService extends TypertRemoteService {
         profile: config.profile,
         hasToken,
         errorCode: 'unconfigured',
-        errorMessage: '填写 Hermes Desktop 当前转发的 dashboard 地址，例如 http://127.0.0.1:<动态端口>',
+        errorMessage: '还没有可用的 dashboard 地址。先打开 Hermes Desktop 连上 SSH，或手动填写当前转发端口。',
       }
     }
     return this.probe(config, hasToken)
@@ -59,9 +71,12 @@ export class HermesBridgeService extends TypertRemoteService {
 
   async saveConnectionConfig(request: ConnectionConfig): Promise<SaveResult> {
     const baseUrl = normalizeBaseUrl(request.baseUrl)
-    const displayName = request.displayName.trim() || 'Hermes'
-    const profile = request.profile.trim()
-    await this.writeConfig({ baseUrl, displayName, profile })
+    const next = {
+      baseUrl,
+      displayName: request.displayName.trim() || 'Hermes',
+      profile: request.profile.trim() || 'default',
+    }
+    await this.credentials.saveConnection(next)
     return { ok: true }
   }
 
@@ -109,14 +124,28 @@ export class HermesBridgeService extends TypertRemoteService {
     const messages: ChatMessage[] = rows.flatMap((row) => {
       if (!row || typeof row !== 'object') return []
       const item = row as Record<string, unknown>
-      const text = extractText(item)
       return [{
-        id: String(item.id ?? item.message_id ?? `${item.role ?? 'unknown'}-${Math.random()}`),
+        id: String(item.id ?? item.message_id ?? `${item.role ?? 'unknown'}`),
         role: String(item.role ?? item.type ?? 'unknown'),
-        text,
+        text: extractText(item),
       }]
     }).reverse()
     return { sessionId: String(raw.session_id ?? sessionId), messages }
+  }
+
+  private async resolveConfig(): Promise<ConnectionConfig> {
+    const saved = await this.credentials.readConnection()
+    const discovered = await discoverHermesDesktop().catch(() => undefined)
+    const token = await this.credentials.readToken()
+    if (!token && discovered?.token) {
+      await this.credentials.saveToken(discovered.token)
+    }
+    const baseUrl = saved.baseUrl || discovered?.baseUrl || this.rowConfig.baseUrl
+    return {
+      baseUrl,
+      displayName: saved.displayName || discovered?.displayName || this.rowConfig.displayName || 'Hermes',
+      profile: saved.profile || discovered?.profile || this.rowConfig.profile || 'default',
+    }
   }
 
   private async probe(config: ConnectionConfig, hasToken: boolean): Promise<ConnectionStatus> {
@@ -128,12 +157,12 @@ export class HermesBridgeService extends TypertRemoteService {
         return status(config, hasToken, 'incompatible', '当前入口没有返回 Hermes /api/health ok')
       }
       if (!token) {
-        return status(config, hasToken, 'unauthorized', '已连通 dashboard，但还没有保存 session token', String(health.displayVersion ?? health.version ?? ''))
+        return status(config, true, 'unauthorized', '已连通 dashboard，但还没有 session token', String(health.displayVersion ?? health.version ?? ''))
       }
       await client.getJson('/api/auth/me')
-      return status(config, hasToken, 'online', undefined, String(health.displayVersion ?? health.version ?? ''))
+      return status(config, true, 'online', undefined, String(health.displayVersion ?? health.version ?? ''))
     } catch (error) {
-      return this.mapError(config, hasToken, error)
+      return this.mapError(config, hasToken || Boolean(token), error)
     }
   }
 
@@ -146,29 +175,11 @@ export class HermesBridgeService extends TypertRemoteService {
   }
 
   private async requireClient(): Promise<{ client: HermesApiClient; profile: string }> {
-    const config = this.readConfig()
+    const config = await this.resolveConfig()
     if (!config.baseUrl) throw Object.assign(new Error('尚未配置 dashboard 地址'), { code: 'unconfigured' })
     const token = await this.credentials.readToken()
     if (!token) throw Object.assign(new Error('尚未保存 session token'), { code: 'unauthorized' })
     return { client: new HermesApiClient(config.baseUrl, token), profile: config.profile }
-  }
-
-  private readConfig(): ConnectionConfig {
-    const raw = (this.host.fiber?.entry?.config ?? {}) as Partial<ConnectionConfig>
-    return {
-      baseUrl: typeof raw.baseUrl === 'string' ? raw.baseUrl : '',
-      displayName: typeof raw.displayName === 'string' && raw.displayName.trim() ? raw.displayName : 'Hermes',
-      profile: typeof raw.profile === 'string' ? raw.profile : '',
-    }
-  }
-
-  private async writeConfig(next: ConnectionConfig): Promise<void> {
-    const entry = this.host.fiber?.entry
-    const editor = this.host.get?.('configEditor') as {
-      edit: (entry: unknown, change: (current: Record<string, unknown>) => Record<string, unknown>) => Promise<void>
-    } | undefined
-    if (!entry || !editor) throw new Error('当前 profile 无法保存插件配置')
-    await editor.edit(entry, (current) => ({ ...current, ...next }))
   }
 }
 

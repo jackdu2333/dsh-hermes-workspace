@@ -157,7 +157,7 @@ function HermesWorkspacePanel(props: { api?: typeof apiShape }) {
     try {
       const nextStatus = await nextApi.getConnectionStatus()
       setStatus(nextStatus)
-      setBaseUrl((current) => current || nextStatus.baseUrl || '')
+      if (nextStatus.baseUrl) setBaseUrl(nextStatus.baseUrl)
       setDisplayName(nextStatus.displayName || 'Hermes')
       setProfile(nextStatus.profile || 'default')
       if (nextStatus.state === 'online') {
@@ -220,7 +220,7 @@ function HermesWorkspacePanel(props: { api?: typeof apiShape }) {
         <StatusBadge state={status?.state ?? 'checking'} />
       </header>
       <p style={bodyStyle}>
-        接入现有 Hermes Desktop SSH dashboard（`/api/health`、`/api/sessions`）。本地端口由 Desktop 动态分配，SSH 隧道变化后需要更新地址。
+        接入现有 Hermes Desktop SSH dashboard。Host 会尝试自动发现当前还活着的本机转发端口；SSH 未连接时保持离线，不会沿用已经失效的旧端口。
       </p>
       {error ? <p style={errorStyle}>{error}</p> : null}
 
