@@ -21,7 +21,7 @@ P0 可用版本：用户能从 DSH 左侧进入 Hermes 工作区，配置连接�
 ## 当前状态
 
 - 更新时间：2026-11-10
-- 适用版本：`@jackdu/dsh-hermes-workspace@0.1.0`，宿主 DSH `0.2.2-rc.1`，profile `desktop`
+- 适用版本：`@jackdu/dsh-hermes-workspace@0.1.0`（提交 `2cce2f2`），宿主 DSH `0.2.2-rc.1`，profile `desktop`
 - 当前阶段：工程骨架已安装，**尚未完成会话/流式闭环**
 - 已完成且已验证：
   - `plugin_manager install_bundle` → `application: applied`
