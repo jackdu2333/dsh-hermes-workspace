@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# 本地环境与密钥（不提交真实凭证）
+.env
+.env.*
+!.env.example
+*.local
+
+# 常见依赖与缓存目录（技术栈未定，先按最可能的形态兜底）
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# 构建产物与日志
+dist/
+build/
+logs/
+*.log
