@@ -1,27 +1,36 @@
 # Hermes Workspace
 
-> 当前阶段：**DSH 侧边栏只做 Hermes 入口，不在 DSH 内渲染官方 Bot 对话页**
+> **2026-11-10 现行决策**：见 [ADR-001](docs/ADR-001-gateway-protocol.md)——DSH 原生 UI 直连 Hermes TUI Gateway JSON-RPC；[P0-00](docs/P0-00-gateway-validation.md) 已执行完毕，UI 已实施。
+> 当前阶段：**Gateway Protocol Adapter 已在 DSH 中运行**；现行状态见下方「当前状态（现行）」，标题带「历史」的段落只作留痕。
 > 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`　版本：`0.1.0`
 
-DeepSeek Harness 原生双端插件。左侧功能栏提供 Hermes 入口。Hermes Agent 是后台运行时；官方对话页在 Hermes Desktop 或 `hermes dashboard`，不在 DSH 里重做。
+## 当前状态（现行，2026-11-10 19:38）
 
-## 目标（现行）
+- **插件实现完成**：DSH 原生面板 + `GatewayTransport` 直连 Hermes TUI Gateway JSON-RPC，恢复 canonical Bot Chat；`pnpm typecheck` / `pnpm build` 均通过，`lib/` 产物已重建，旧 REST 适配器已清理。
+- **协议验证完成**：P0-00 只读组 E0–E5/E7、写入组 E6/E9/E10 通过；E8 数据层证明与 Hermes Desktop 共用同一条会话，16:38 拿到正常模型回复 `PONG-DSH-OK`。B1（远端模型 400）已自愈。详见 [P0-00](docs/P0-00-gateway-validation.md)。
+- **宿主环境故障已定位（与插件无关）**：① DSH `0.2.2-rc.1` 的 `dsh-auth-*` cookie 累积到 71 条撑爆 Node 16KB 请求头上限 → 431 → 启动报 `Web authentication failed`，清理历史 cookie 后修复（RC 缺陷，约 70 次启动后会复发）；② 账号 accessToken 过期触发 `session-expired` → `showWelcome()`，导致反复弹回「开始设置」页，需完成登录或配置 API Key。19:02 强制重启成功（Host `127.0.0.1:58208`，无新增崩溃日志）。完整证据、二分诊断与全部踩坑见 **[实验进展与踩坑记录](docs/EXPERIMENT-LOG.md)**。
+- **验收待办**：DSH 面板 UI 目视（UI-01 修复后）、E8 的 Desktop 目视；依赖 DSH 主界面可见、账号态恢复、Hermes Desktop 提供 SSH `127.0.0.1:22222` 端点。
+- **已知边界**：SSH 端点 `22222` 由 Hermes Desktop 提供，未运行时插件传输层会 `Connection refused`；Gateway 端口每次 discovery，不可硬编码。
 
-用户从 DSH 左侧点 Hermes，进入官方 Hermes 对话面：优先打开本机已运行的 `hermes dashboard` `/chat`；没有 dashboard 时打开 Hermes Desktop。插件不实现 Agent 能力。
+## 目标（现行，ADR-001）
 
-用户后来明确：**侧边栏只是入口，里面不需要自己开发聊天区。**
+**在 DSH 里稳定跟 Delores 等多个 Bot 持续聊、保持人格与记忆连续**；多 Bot 管理为后续。实现方式是 DSH 原生面板直连 Hermes TUI Gateway JSON-RPC，恢复 Bot Mode 的 canonical Bot Chat，不另建一套聊天。
+
+> 历史阶段（11-10 中午前）：「侧边栏只做入口，不自建聊天区」。下方「非目标」与「当前状态（历史记录）」属该阶段留痕，已失效条目就地标注。
 
 ## 非目标
 
 - 不修改 DSH 核心或 Hermes Runtime
 - 不在插件内实现 Agent Loop / Memory / 人格 / 工具执行
-- 不在 DSH 主面板 iframe 嵌入 dashboard `/chat`（跨源会卡住 Loading chat）
+- 不在 DSH 主面板 iframe 嵌入 dashboard `/chat`（**设计取舍**，非技术不可能；实测主因是 Gateway listener withhold token 使 `/api/*` 401，不是跨源）
 - 不把 API Key / session token 明文放进浏览器或普通配置
 - 不接管 Telegram / Discord 等渠道会话
-- 不由插件管理 SSH 进程
+- ~~不由插件管理 SSH 进程~~ **已失效**：插件现在自己拉起并管理 Gateway 隧道；现行边界是「不修改 Hermes Runtime 的配置与数据」
 - 不把 8642 API Server 当成官方页面
 
-## 当前状态
+## 当前状态（历史记录）
+
+> 以下为「只做入口」阶段的记录；现行状态见 [ADR-001](docs/ADR-001-gateway-protocol.md) 与 [P0-00](docs/P0-00-gateway-validation.md)。
 
 - 更新时间：2026-11-10
 - 宿主：DSH `0.2.2-rc.1`，profile `desktop`
@@ -96,8 +105,9 @@ pnpm build
 
 | 信息 | 位置 |
 |---|---|
-| 目标、范围、非目标、验收 | 本 README。V1.0 PRD 是早期双端聊天工作区规格，**已被「只做入口」覆盖** |
-| 当前阶段、已验证、阻塞 | 本 README「当前状态」 |
+| 目标、范围、非目标、验收 | V1.0 PRD 与「只做入口」均为历史阶段；**现行以 [ADR-001](docs/ADR-001-gateway-protocol.md) 为准** |
+| 当前阶段、已验证、阻塞 | 本 README「当前状态（现行）」；协议验证以 [P0-00](docs/P0-00-gateway-validation.md) 为准 |
+| 过程证据、全部踩坑、宿主环境故障 | **[实验进展与踩坑记录](docs/EXPERIMENT-LOG.md)** |
 | 官方端口与对话页 | 本 README「官方对话页与端口」 |
 | 阶段路由 | [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md) |
 
@@ -107,6 +117,8 @@ pnpm build
 不另建 `AGENTS.md`。
 
 ## 下一步
+
+> **2026-11-10：本节已被 [ADR-001](docs/ADR-001-gateway-protocol.md) 取代**。改为直连 TUI Gateway JSON-RPC，[P0-00](docs/P0-00-gateway-validation.md) 已执行完毕；**现行待办以 [实验进展与踩坑记录](docs/EXPERIMENT-LOG.md) 第 6 节为准**（面板 UI 目视、E8 Desktop 目视、账号态恢复、多 Bot P1）。以下仅作历史记录。
 
 若仍要「在 DSH 里看见对话」，只能二选一，且都不是官方 Bot Chat 容器：
 

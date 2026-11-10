@@ -1,257 +1,76 @@
+import { randomUUID } from 'node:crypto'
 import Schema from '@deepseek-ai/schemastery'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { PACKAGE_NAME, PANEL_ID, REMOTE_NAMESPACE } from '../shared/constants'
-import { spawn } from 'node:child_process'
+import { GatewayTransport } from './gatewayRemote'
 import type {
+  BotProfile,
+  BotRoster,
   ChatMessage,
-  ConnectionConfig,
-  ConnectionStatus,
-  MessagePage,
-  NativeChatTarget,
-  OpenNativeResult,
+  EventsPage,
+  GatewayStatus,
+  InterruptResult,
+  OpenRequest,
   PingResult,
-  SaveResult,
-  SessionPage,
-  SessionSummary,
+  PromptResult,
+  ResumeResult,
 } from '../shared/dto'
-import { discoverDashboardSpa, discoverHermesDesktop } from './discover'
-import { HermesApiClient, HermesHttpError } from './HermesApiClient'
-import { HermesCredentialStore } from './HermesCredentialStore'
-import { normalizeBaseUrl } from './url'
 
 type HostContext = {
   logger?: { info?: (...args: unknown[]) => void; warn?: (...args: unknown[]) => void }
   effect: (callback: () => () => void, label?: string) => () => void
   get?: (name: string) => unknown
-  credentials?: ConstructorParameters<typeof HermesCredentialStore>[0]
+}
+
+interface GatewayConfig {
+  sshHost: string
+  sshPort: number
+  sshUser: string
+}
+
+interface RpcProfileRow {
+  name?: unknown
+  display_name?: unknown
+  is_default?: unknown
+  model?: unknown
+  description?: unknown
+  canonical_session?: { id?: unknown } | null
+}
+
+interface RpcMessageRow {
+  role?: unknown
+  content?: unknown
+  message_uid?: unknown
+  row_id?: unknown
+  timestamp?: unknown
+}
+
+interface RpcResumeResult {
+  session_id?: unknown
+  messages?: RpcMessageRow[]
+  message_count?: unknown
+  running?: unknown
+  open_requests?: unknown[]
+  subscription_id?: unknown
+  execution_generation?: unknown
 }
 
 export const Config = Schema.object({
-  baseUrl: Schema.string().default('').description('Hermes dashboard URL，例如 http://127.0.0.1:59585'),
-  displayName: Schema.string().default('Hermes'),
-  profile: Schema.string().default('default'),
+  sshHost: Schema.string().default('127.0.0.1').description('Hermes 所在机器的 SSH 地址'),
+  sshPort: Schema.number().default(22222).description('Hermes 所在机器的 SSH 端口'),
+  sshUser: Schema.string().default('jackdu').description('运行 Hermes 的系统用户'),
 })
 
-export class HermesBridgeService extends TypertRemoteService {
-  static inject = ['credentials'] as const
-  static Config = Config
-  private readonly credentials: HermesCredentialStore
-  private readonly rowConfig: ConnectionConfig
-
-  constructor(ctx: HostContext, config: Partial<ConnectionConfig> = {}) {
-    super(ctx as never, REMOTE_NAMESPACE)
-    this.rowConfig = {
-      baseUrl: typeof config.baseUrl === 'string' ? config.baseUrl : '',
-      displayName: typeof config.displayName === 'string' && config.displayName.trim() ? config.displayName : 'Hermes',
-      profile: typeof config.profile === 'string' ? config.profile : 'default',
-    }
-    this.credentials = new HermesCredentialStore(ctx.credentials ?? (ctx.get?.('credentials') as never))
-    ctx.logger?.info?.('hermes-workspace: host bridge started')
-    ctx.effect(() => () => {
-      ctx.logger?.info?.('hermes-workspace: host bridge disposed')
-    }, 'hermes-workspace: dispose')
-  }
-
-  async ping(): Promise<PingResult> {
-    return { ok: true, plugin: PACKAGE_NAME, panelId: PANEL_ID, at: Date.now() }
-  }
-
-  async getNativeChatTarget(): Promise<NativeChatTarget> {
-    const spa = await discoverDashboardSpa()
-    if (spa) return { available: true, url: spa.url, version: spa.version }
-    return {
-      available: false,
-      errorMessage: '本机没有可用的 hermes dashboard（原生 /chat）。当前 SSH 后端是 headless serve，没有网页对话区。请先运行 hermes dashboard。',
-    }
-  }
-
-  async openNativeChat(): Promise<OpenNativeResult> {
-    const spa = await discoverDashboardSpa()
-    if (spa) {
-      const opened = await tryOpen(['open', spa.url])
-      if (opened.ok) return { ok: true, method: 'dashboard' }
-      return { ok: false, method: 'dashboard', errorMessage: opened.errorMessage }
-    }
-    const deeplink = await tryOpen(['open', 'hermes://open/'])
-    if (deeplink.ok) return { ok: true, method: 'deeplink' }
-    const app = await tryOpen(['open', '-a', 'Hermes'])
-    if (app.ok) return { ok: true, method: 'app' }
-    return {
-      ok: false,
-      method: 'app',
-      errorMessage: '找不到 Hermes 原生对话区。请运行 hermes dashboard，或打开 Hermes Desktop。',
-    }
-  }
-
-  async getConnectionStatus(): Promise<ConnectionStatus> {
-    const config = await this.resolveConfig()
-    const hasToken = await this.credentials.hasToken()
-    if (!config.baseUrl) {
-      return {
-        state: 'unconfigured',
-        displayName: config.displayName,
-        profile: config.profile,
-        hasToken,
-        errorCode: 'unconfigured',
-        errorMessage: '还没有可用的 dashboard 地址。先打开 Hermes Desktop 连上 SSH，或手动填写当前转发端口。',
-      }
-    }
-    return this.probe(config, hasToken)
-  }
-
-  async saveConnectionConfig(request: ConnectionConfig): Promise<SaveResult> {
-    const baseUrl = normalizeBaseUrl(request.baseUrl)
-    const next = {
-      baseUrl,
-      displayName: request.displayName.trim() || 'Hermes',
-      profile: request.profile.trim() || 'default',
-    }
-    await this.credentials.saveConnection(next)
-    return { ok: true }
-  }
-
-  async saveApiKey(request: { token: string }): Promise<SaveResult> {
-    await this.credentials.saveToken(request.token)
-    return { ok: true }
-  }
-
-  async testConnection(): Promise<ConnectionStatus> {
-    return this.getConnectionStatus()
-  }
-
-  async listSessions(): Promise<SessionPage> {
-    const { client, profile } = await this.requireClient()
-    const query = new URLSearchParams({ limit: '40', offset: '0', order: 'recent', archived: 'exclude' })
-    if (profile) query.set('profile', profile)
-    const raw = await client.getJson<Record<string, unknown>>(`/api/sessions?${query}`)
-    const rows = Array.isArray(raw.sessions) ? raw.sessions : []
-    const sessions: SessionSummary[] = rows.flatMap((row) => {
-      if (!row || typeof row !== 'object') return []
-      const item = row as Record<string, unknown>
-      const id = String(item.id ?? item.session_id ?? '')
-      if (!id) return []
-      return [{
-        id,
-        title: String(item.title ?? item.name ?? id),
-        source: typeof item.source === 'string' ? item.source : undefined,
-        updatedAt: String(item.updated_at ?? item.updatedAt ?? item.last_activity ?? ''),
-        messageCount: typeof item.message_count === 'number' ? item.message_count : undefined,
-      }]
-    })
-    return { sessions, total: typeof raw.total === 'number' ? raw.total : sessions.length }
-  }
-
-  async getSessionMessages(request: { sessionId: string }): Promise<MessagePage> {
-    const sessionId = request.sessionId.trim()
-    if (!sessionId) throw new Error('缺少 sessionId')
-    const { client, profile } = await this.requireClient()
-    const query = new URLSearchParams({ limit: '80', order: 'latest' })
-    if (profile) query.set('profile', profile)
-    const raw = await client.getJson<Record<string, unknown>>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/messages?${query}`,
-    )
-    const rows = Array.isArray(raw.messages) ? raw.messages : []
-    const messages: ChatMessage[] = rows.flatMap((row) => {
-      if (!row || typeof row !== 'object') return []
-      const item = row as Record<string, unknown>
-      return [{
-        id: String(item.id ?? item.message_id ?? `${item.role ?? 'unknown'}`),
-        role: String(item.role ?? item.type ?? 'unknown'),
-        text: extractText(item),
-      }]
-    }).reverse()
-    return { sessionId: String(raw.session_id ?? sessionId), messages }
-  }
-
-  private async resolveConfig(): Promise<ConnectionConfig> {
-    const saved = await this.credentials.readConnection()
-    const discovered = await discoverHermesDesktop().catch(() => undefined)
-    const token = await this.credentials.readToken()
-    if (!token && discovered?.token) {
-      await this.credentials.saveToken(discovered.token)
-    }
-    const baseUrl = saved.baseUrl || discovered?.baseUrl || this.rowConfig.baseUrl
-    return {
-      baseUrl,
-      displayName: saved.displayName || discovered?.displayName || this.rowConfig.displayName || 'Hermes',
-      profile: saved.profile || discovered?.profile || this.rowConfig.profile || 'default',
-    }
-  }
-
-  private async probe(config: ConnectionConfig, hasToken: boolean): Promise<ConnectionStatus> {
-    const token = await this.credentials.readToken()
-    const client = new HermesApiClient(config.baseUrl, token)
-    try {
-      const health = await client.getJson<Record<string, unknown>>('/api/health')
-      if (health.ok !== true) {
-        return status(config, hasToken, 'incompatible', '当前入口没有返回 Hermes /api/health ok')
-      }
-      if (!token) {
-        return status(config, true, 'unauthorized', '已连通 dashboard，但还没有 session token', String(health.displayVersion ?? health.version ?? ''))
-      }
-      await client.getJson('/api/auth/me')
-      return status(config, true, 'online', undefined, String(health.displayVersion ?? health.version ?? ''))
-    } catch (error) {
-      return this.mapError(config, hasToken || Boolean(token), error)
-    }
-  }
-
-  private mapError(config: ConnectionConfig, hasToken: boolean, error: unknown): ConnectionStatus {
-    if (error instanceof HermesHttpError) {
-      return status(config, hasToken, error.code as ConnectionStatus['state'], error.message)
-    }
-    const message = error instanceof Error ? error.message : String(error)
-    return status(config, hasToken, 'offline', message)
-  }
-
-  private async requireClient(): Promise<{ client: HermesApiClient; profile: string }> {
-    const config = await this.resolveConfig()
-    if (!config.baseUrl) throw Object.assign(new Error('尚未配置 dashboard 地址'), { code: 'unconfigured' })
-    const token = await this.credentials.readToken()
-    if (!token) throw Object.assign(new Error('尚未保存 session token'), { code: 'unauthorized' })
-    return { client: new HermesApiClient(config.baseUrl, token), profile: config.profile }
-  }
-}
-
-function status(
-  config: ConnectionConfig,
-  hasToken: boolean,
-  state: ConnectionStatus['state'],
-  errorMessage?: string,
-  version?: string,
-): ConnectionStatus {
-  return {
-    state,
-    displayName: config.displayName,
-    profile: config.profile,
-    baseUrl: config.baseUrl,
-    version,
-    lastCheckedAt: Date.now(),
-    hasToken,
-    errorCode: state === 'online' ? undefined : state,
-    errorMessage,
-  }
-}
-
-function tryOpen(argv: string[]): Promise<{ ok: boolean; errorMessage?: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(argv[0]!, argv.slice(1), { stdio: 'ignore', detached: true })
-    child.once('error', (error) => resolve({ ok: false, errorMessage: error.message }))
-    child.once('spawn', () => {
-      child.unref()
-      resolve({ ok: true })
-    })
-  })
-}
-
-function extractText(item: Record<string, unknown>): string {
-  if (typeof item.content === 'string') return item.content
-  if (typeof item.text === 'string') return item.text
-  if (Array.isArray(item.content)) {
-    return item.content
-      .map((part) => {
+/** 把 Gateway 的 content（字符串或结构化 parts）收敛成展示文本。 */
+function extractText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map(part => {
         if (typeof part === 'string') return part
-        if (part && typeof part === 'object' && 'text' in part) return String((part as { text?: unknown }).text ?? '')
+        if (part && typeof part === 'object' && 'text' in part) {
+          return String((part as { text?: unknown }).text ?? '')
+        }
         return ''
       })
       .filter(Boolean)
@@ -260,17 +79,126 @@ function extractText(item: Record<string, unknown>): string {
   return ''
 }
 
+export class HermesBridgeService extends TypertRemoteService {
+  static inject = [] as const
+  static Config = Config
+  private readonly transport: GatewayTransport
+
+  constructor(ctx: HostContext, config: Partial<GatewayConfig> = {}) {
+    super(ctx as never, REMOTE_NAMESPACE)
+    this.transport = new GatewayTransport({
+      host: typeof config.sshHost === 'string' && config.sshHost ? config.sshHost : '127.0.0.1',
+      port: typeof config.sshPort === 'number' ? config.sshPort : 22222,
+      user: typeof config.sshUser === 'string' && config.sshUser ? config.sshUser : 'jackdu',
+    })
+    ctx.logger?.info?.('hermes-workspace: gateway bridge started')
+    void this.transport.connect().catch(error => {
+      ctx.logger?.warn?.('hermes-workspace: initial gateway connect failed: %o', error)
+    })
+    ctx.effect(() => () => {
+      this.transport.close()
+      ctx.logger?.info?.('hermes-workspace: gateway bridge disposed')
+    }, 'hermes-workspace: dispose')
+  }
+
+  async ping(): Promise<PingResult> {
+    return { ok: true, plugin: PACKAGE_NAME, panelId: PANEL_ID, at: Date.now() }
+  }
+
+  async getConnectionStatus(): Promise<GatewayStatus> {
+    return this.transport.status
+  }
+
+  async getBotRoster(): Promise<BotRoster> {
+    const raw = await this.transport.rpc<{ profiles?: RpcProfileRow[]; bot_mode_protocol?: unknown }>(
+      'profiles.list', { include_sessions: true },
+    )
+    const profiles: BotProfile[] = (raw.profiles ?? []).map(row => ({
+      name: String(row.name ?? ''),
+      displayName: String(row.display_name ?? row.name ?? ''),
+      isDefault: Boolean(row.is_default),
+      model: String(row.model ?? ''),
+      description: String(row.description ?? ''),
+      canonicalSessionId: row.canonical_session?.id ? String(row.canonical_session.id) : undefined,
+    }))
+    return { profiles, botModeProtocol: Boolean(raw.bot_mode_protocol) }
+  }
+
+  async resumeSession(request: { sessionId: string }): Promise<ResumeResult> {
+    const sessionId = request.sessionId.trim()
+    if (!sessionId) throw new Error('缺少 sessionId')
+    const raw = await this.transport.rpc<RpcResumeResult>('session.resume', {
+      session_id: sessionId,
+      defer_history: true,
+    })
+    const messages: ChatMessage[] = (raw.messages ?? []).map((row, index) => ({
+      id: String(row.message_uid ?? row.row_id ?? index),
+      role: String(row.role ?? 'unknown'),
+      text: extractText(row.content),
+      timestamp: row.timestamp == null ? undefined : String(row.timestamp),
+    }))
+    return {
+      sessionId: String(raw.session_id ?? sessionId),
+      messages,
+      messageCount: typeof raw.message_count === 'number' ? raw.message_count : messages.length,
+      running: Boolean(raw.running),
+      openRequests: (raw.open_requests ?? []) as OpenRequest[],
+      subscriptionId: raw.subscription_id == null ? undefined : String(raw.subscription_id),
+      executionGeneration: typeof raw.execution_generation === 'number' ? raw.execution_generation : undefined,
+    }
+  }
+
+  /** 写入操作：仅在用户点击发送时调用，插件启动与恢复会话都不会自动发消息。
+   *  Gateway 的 admission gate 要求每次提交带唯一的 submission_id（官方 Desktop 同样自动补 UUID）。 */
+  async submitPrompt(request: { sessionId: string; text: string }): Promise<PromptResult> {
+    const sessionId = request.sessionId.trim()
+    const text = request.text.trim()
+    if (!sessionId || !text) return { accepted: false, errorMessage: '会话或消息为空' }
+    try {
+      await this.transport.rpc('prompt.submit', {
+        session_id: sessionId,
+        text,
+        submission_id: randomUUID(),
+      })
+      return { accepted: true }
+    } catch (error) {
+      return { accepted: false, errorMessage: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** 写入操作：仅在用户点击中断时调用。execution_generation 由 session.resume 返回，
+   *  不回传会被 Gateway 判为 stale_generation 并拒绝。 */
+  async interruptSession(request: { sessionId: string; executionGeneration?: number }): Promise<InterruptResult> {
+    const sessionId = request.sessionId.trim()
+    if (!sessionId) return { accepted: false, errorMessage: '缺少 sessionId' }
+    if (typeof request.executionGeneration !== 'number') {
+      return { accepted: false, errorMessage: '缺少执行代次，请先恢复会话' }
+    }
+    try {
+      await this.transport.rpc('session.interrupt', {
+        session_id: sessionId,
+        execution_generation: request.executionGeneration,
+      })
+      return { accepted: true }
+    } catch (error) {
+      return { accepted: false, errorMessage: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  async getEvents(): Promise<EventsPage> {
+    return { events: this.transport.drainEvents() }
+  }
+}
+
 const prototype = HermesBridgeService.prototype as unknown as Record<string, (...args: never[]) => Promise<unknown>>
 for (const name of [
   'ping',
-  'getNativeChatTarget',
-  'openNativeChat',
   'getConnectionStatus',
-  'saveConnectionConfig',
-  'saveApiKey',
-  'testConnection',
-  'listSessions',
-  'getSessionMessages',
+  'getBotRoster',
+  'resumeSession',
+  'submitPrompt',
+  'interruptSession',
+  'getEvents',
 ] as const) {
   ;(Remote(name) as (value: unknown, context: unknown) => void)(prototype[name], {
     name,

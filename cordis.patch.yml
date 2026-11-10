@@ -2,6 +2,6 @@
     - id: hermes-workspace
       name: '@jackdu/dsh-hermes-workspace'
       config:
-        baseUrl: ''
-        displayName: Hermes
-        profile: default
+        sshHost: 127.0.0.1
+        sshPort: 22222
+        sshUser: jackdu

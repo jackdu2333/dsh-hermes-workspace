@@ -19,3 +19,6 @@ build/
 logs/
 *.log
 *.tsbuildinfo
+
+# 本地工作日志与会话记忆（含本机路径与诊断细节，不推送到远端）
+.workbuddy/
