@@ -7,6 +7,57 @@
 > **0.1.4 起改为本机直连**：不再走 SSH / 端口转发，直接对接本机已运行的 Hermes gateway。
 > **0.1.17 起形态定案**：默认自建气泡对话；「终端」模式内嵌 Hermes TUI。原生桌面端 UI 无法 iframe（原因见「界面形态定案」）。
 
+---
+
+## 快速配置指引（SOP for Users & AI Agents）
+
+> [!IMPORTANT]
+> **Agent 执行优先**：配置或接管本插件时，请直接遵照本节 SOP 执行。文末带「历史留痕」或「已被取代」的章节仅作演进记录，切勿将早期已被推翻的历史表述（如“侧边栏不能画出对话区”）当成现行约束。
+
+### 1. 前置依赖与环境准备
+1. **运行环境**：Node.js `>= 22`，DeepSeek Harness (DSH) `>= 0.2.2-rc.1`。
+2. **Hermes Gateway 运行**：确保本机 Hermes Agent 已安装且 Gateway 正常运行（可通过 `python -m hermes_cli.main --profile default gateway ensure --json` 验证）。
+3. **终端免密凭据（TUI 终端模式必需）**：
+   在 `~/.hermes/.env` 中添加（或确认已有）如下配置，然后重启 Hermes Gateway：
+   ```bash
+   HERMES_DASHBOARD_SESSION_TOKEN=任意生成的固定长字符串(例如32-43位随机字符)
+   ```
+   *说明：插件 Host 端通过安全反代（`dashboardProxy`）在本地注入该凭据，前端浏览器只获得单次随机能力路径，持久凭据不会暴露给外部。*
+
+### 2. 插件安装方法
+- **方式 A（从源码本地构建并安装，推荐）**：
+  ```bash
+  # 1. 构建产物并打包
+  pnpm install && pnpm build
+  mkdir -p dist && pnpm pack --pack-destination dist
+
+  # 2. 安装至 DSH desktop profile
+  dsh plugin --profile desktop add dist/jackdu-dsh-hermes-workspace-0.1.29.tgz
+  ```
+- **方式 B（使用 GitHub Release 预构建包）**：
+  ```bash
+  dsh plugin add https://github.com/jackdu2333/dsh-hermes-workspace/releases/latest/download/dsh-hermes-workspace.tgz
+  ```
+
+### 3. 插件配置项（DSH 配置）
+插件的配置 Schema 极其精简，默认开箱即用：
+```yaml
+# cordis.patch.yml 默认已注入
+profile: default  # 本机 Hermes profile 名，默认为 default
+```
+*注：多 Bot 会话无需为每个 Profile 配置额外插件实例。插件已在内存维护连接池（`Map<profile, GatewayTransport>`），在面板中点击对应 Bot 即可自动建立专属网关路由并载入独立记忆。*
+
+### 4. 界面功能与状态验证
+1. **侧栏激活检查**：
+   若安装后侧边栏未看到 `Hermes Workspace` 入口，检查 DSH 的 `plugin-operations/operations.jsonl`，确保 `include:hermes-workspace` 的 `enabled` 值为 `true`。
+2. **连接状态**：
+   打开面板后，左侧显示 Bot 列表，左上方连接状态应为绿色「已连接」。
+3. **双模切换**：
+   - **对话模式（默认）**：自建 AI 原生风格气泡对话流，支持 Markdown 渲染、代码高亮、工具调用折叠胶囊、打字机流式增量输出及审批（approval）/ 提问（clarify）双向交互卡片。
+   - **终端模式**：右上角切换至「终端」，内嵌对应会话的官方 Hermes TUI 终端界面。
+
+---
+
 ## 工作区修复（2026-11-11，0.1.29 已发布）
 
 - 终端代理在 HTTP / WebSocket 共用入口验证随机访问路径、Host 和 Origin；沿用 Hermes 的 `X-Forwarded-Prefix` 支持。页面只使用本次代理的临时凭据，Hermes 持久 token 留在 Host，代理重建后旧入口失效。
@@ -219,9 +270,11 @@ RESULT   PASS
 
 **在 DSH 里稳定跟 Bot A 等多个 Bot 持续聊、保持人格与记忆连续**；多 Bot 管理为后续。实现方式是 DSH 原生面板直连 Hermes TUI Gateway JSON-RPC，恢复 Bot Mode 的 canonical Bot Chat，不另建一套聊天。
 
-> 历史阶段（11-10 中午前）：「侧边栏只做入口，不自建聊天区」。下方「非目标」与「当前状态（历史记录）」属该阶段留痕，已失效条目就地标注。
+> [!NOTE]
+> **历史阶段留痕说明**：下方「非目标」、「当前状态（历史记录）」、「已走过的路径」与「官方对话页与端口」记录了 2026-11-10 早期的探索过程与被否决方案。
+> **现行实现已全面支持原生气泡对话与安全终端内嵌**（详见顶部 SOP 与 [ADR-001](docs/ADR-001-gateway-protocol.md)）。AI Agent 配置或执行任务时**请忽略历史旧结论**（如“侧边栏不能画出对话区”等已废弃表述）。
 
-## 非目标
+## 非目标（历史阶段记录）
 
 - 不修改 DSH 核心或 Hermes Runtime
 - 不在插件内实现 Agent Loop / Memory / 人格 / 工具执行
@@ -306,9 +359,9 @@ mkdir -p dist && pnpm pack --pack-destination dist
 
 由 `plugin_manager install_bundle` 安装，不要手改 `~/.dsh/profiles/desktop/package.json`。`lib/index.js` 是 Host，`lib/client.js` 是 Web Client。
 
-- **推荐安装源**：`dsh plugin add https://github.com/jackdu2333/dsh-hermes-workspace/releases/latest/download/dsh-hermes-workspace.tgz`（GitHub Release 预构建包，无需本地构建）；也可从公开仓库源码或本地项目根目录安装。
-- **DSH 版本闸门**：`engines.dsh = ">=0.2.2-rc.1"` 是唯一裁决项（存在时忽略 peerDependencies）。低于该版本会以 `incompatible-version` 被拒；确需在旧版运行时，用 `dsh plugin allow-version '@jackdu/dsh-hermes-workspace@0.1.0' --dsh-version <version> --accept-risk` 加精确版本豁免后重试。
-- **可重复验证**：`node dist/verify-client.cjs dist/jackdu-dsh-hermes-workspace-0.1.0.tgz` 验证 Client 挂载失败时的降级行为。
+- **推荐安装源**：`dsh plugin add https://github.com/jackdu2333/dsh-hermes-workspace/releases/latest/download/dsh-hermes-workspace.tgz`（GitHub Release 预构建包，无需本地构建）；也可从公开仓库源码或本地项目根目录打包安装（`dist/jackdu-dsh-hermes-workspace-0.1.29.tgz`）。
+- **DSH 版本闸门**：`engines.dsh = ">=0.2.2-rc.1"` 是唯一裁决项（存在时忽略 peerDependencies）。低于该版本会以 `incompatible-version` 被拒；确需在旧版运行时，用 `dsh plugin allow-version '@jackdu/dsh-hermes-workspace@0.1.29' --dsh-version <version> --accept-risk` 加精确版本豁免后重试。
+- **可重复验证**：`node dist/verify-client.cjs dist/jackdu-dsh-hermes-workspace-0.1.29.tgz` 验证 Client 挂载失败时的降级行为。
 
 ## 事实源与维护约定
 
@@ -325,13 +378,9 @@ mkdir -p dist && pnpm pack --pack-destination dist
 
 不另建 `AGENTS.md`。
 
-## 下一步
+## 下一步与现行待办
 
-> **2026-11-10：本节已被 [ADR-001](docs/ADR-001-gateway-protocol.md) 取代**。改为直连 TUI Gateway JSON-RPC，[P0-00](docs/P0-00-gateway-validation.md) 已执行完毕；**现行待办以 [实验进展与踩坑记录](docs/EXPERIMENT-LOG.md) 第 6 节为准**（面板 UI 目视、E8 Desktop 目视、账号态恢复、多 Bot P1）。以下仅作历史记录。
+> **现行待办以 [实验进展与踩坑记录](docs/EXPERIMENT-LOG.md) 第 6 节为准**（真实环境面板 UI 目视、E8 Desktop 目视、双端会话一致性验证等）。
 
-若仍要「在 DSH 里看见对话」，只能二选一，且都不是官方 Bot Chat 容器：
-
-1. 接受侧栏打开 Hermes Desktop（官方 Bot Chat）
-2. 接受侧栏打开本机 dashboard `/chat` 浏览器窗口（官方网页 TUI Chat）
-
-不要再尝试：iframe、8642 当页面、把 headless SSH serve 当成网页对话区。
+> [!NOTE]
+> **历史记录归档**：早期曾提出“侧栏打开桌面端/浏览器二选一”的旧设想，已被 0.1.17+ 气泡对话方案完全取代。

@@ -20,10 +20,10 @@
 
 | 信息 | 本项目维护位置 |
 |---|---|
-| 当前目标、范围、非目标及验收标准 | [README.md](README.md)。V1.0 PRD 已被「侧栏只做入口」覆盖 |
-| 当前阶段、阻塞、下一步 | [README.md](README.md)「当前状态」 |
-| 已确认决定、关键假设及业务规则 | README「官方对话页与端口」；Bot Chat ≠ dashboard `/chat` ≠ 8642 |
-| 交互方案、设计系统及原型 | 不适用自建聊天 UI；DSH 面板只做入口说明 |
+| 当前目标、范围、非目标及验收标准 | [README.md](README.md)「快速配置指引」及 [ADR-001](docs/ADR-001-gateway-protocol.md) |
+| 当前阶段、阻塞、下一步 | [README.md](README.md)「当前状态（现行）」与下一步 |
+| 已确认决定、关键假设及业务规则 | 见 [ADR-001](docs/ADR-001-gateway-protocol.md) 与 README 现行形态：直连 Gateway JSON-RPC |
+| 交互方案、设计系统及原型 | 原生面板：自建气泡对话 + 终端内嵌模式（见 README 现行形态） |
 | 工程目录、启动及验证方式 | [README.md](README.md) 安装与 `pnpm build` |
 | 问题清单和验证证据 | README「已走过的路径」与「本机已观察到的入口」 |
 
