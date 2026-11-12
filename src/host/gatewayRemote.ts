@@ -1,20 +1,9 @@
 import { spawn } from 'node:child_process'
-import type { GatewayEvent, GatewayState, GatewayStatus } from '../shared/dto'
+import type { GatewayEvent, GatewayState, GatewayStatus, PendingRequest } from '../shared/dto'
 
 export interface GatewayTarget {
   /** 本机 Hermes profile 名，对应 `hermes --profile <name>`。 */
   profile: string
-}
-
-/** gateway 主动发来的交互请求（审批 / 提问）。
- *  这类帧带 `method` + `id`，是 server→client 的 JSON-RPC request，
- *  必须用**同一个 id** 回 result；回 error 会让 agent 拿到「客户端不支持」。 */
-export interface PendingRequest {
-  id: number | string
-  method: string
-  sessionId?: string
-  params: Record<string, unknown>
-  receivedAt: number
 }
 
 interface AttachInfo {
@@ -86,6 +75,9 @@ export class GatewayTransport {
   private events: GatewayEvent[] = []
   /** 还等着用户决定的交互请求。面板每轮轮询取全量，用户点了才回包。 */
   private requests: PendingRequest[] = []
+  /** 快照读取期间仍会收到实时撤回；保留变更版本，避免迟到快照复活失效卡片。 */
+  private requestVersion = 0
+  private readonly requestUpdates = new Map<string, number>()
   private seq = 0
   private state: GatewayState = 'disconnected'
   private lastError?: string
@@ -180,15 +172,27 @@ export class GatewayTransport {
         } else {
           pending.resolve(frame.result ?? {})
         }
+        if (this.pending.size === 0) this.requestUpdates.clear()
         return
       }
       if (frame.method === 'event') {
         const params = (frame.params ?? {}) as GatewayEvent
+        const payload = params.payload ?? {}
+        const sessionId = params.session_id ?? params.sessionId
         // 后端撤回请求时同步清卡片，否则用户会对一个已失效的审批点「允许」。
         if (params.type === 'request.cancel') {
-          const payload = (params.payload ?? {}) as Record<string, unknown>
           const cancelled = String(payload.id ?? '')
-          this.requests = this.requests.filter(item => String(item.id) !== cancelled)
+          this.removeRequests(item => String(item.id) === cancelled && (!sessionId || item.sessionId === sessionId))
+          this.requestUpdates.set(JSON.stringify(['rpc', sessionId, payload.id]), ++this.requestVersion)
+        } else if (params.type === 'approval.request' || params.type === 'clarify.request') {
+          const request = this.canonicalRequest({ ...payload, kind: params.type.split('.')[0] }, sessionId, params.execution_generation)
+          if (request) this.storeRequest(request)
+        } else if (params.type === 'approval.settled' || params.type === 'clarify.settled') {
+          this.removeRequests(item => item.protocol === 'canonical'
+            && String(item.id) === String(payload.prompt_id)
+            && item.sessionId === sessionId
+            && (payload.execution_generation === undefined || item.executionGeneration === payload.execution_generation))
+          this.requestUpdates.set(JSON.stringify(['canonical', sessionId, payload.prompt_id]), ++this.requestVersion)
         }
         this.events.push(params)
         // 流式时 message.delta 是逐 token 来的，500 条在长回答里会被顶掉。
@@ -201,8 +205,7 @@ export class GatewayTransport {
         const method = String(frame.method)
         const params = (frame.params ?? {}) as Record<string, unknown>
         if (method === 'approval' || method === 'clarify') {
-          this.requests = this.requests.filter(item => item.id !== id)
-          this.requests.push({
+          this.storeRequest({
             id: id as number | string,
             method,
             sessionId: typeof params.session_id === 'string' ? params.session_id : undefined,
@@ -235,6 +238,7 @@ export class GatewayTransport {
         this.state = 'disconnected'
         this.ws = null
         this.requests = []
+        this.requestUpdates.clear()
         this.rejectPending(new Error('Gateway 连接已断开'))
       }
     }
@@ -250,6 +254,7 @@ export class GatewayTransport {
     this.ws = null
     if (ws && ws.readyState === WebSocket.OPEN) ws.close()
     this.requests = []
+    this.requestUpdates.clear()
     this.rejectPending(new Error('Gateway 连接已重置'))
   }
 
@@ -265,13 +270,18 @@ export class GatewayTransport {
   async rpc<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     const ws = await this.ensureOpen()
     const id = ++this.seq
+    const requestVersion = this.requestVersion
     const result = await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error(`Gateway RPC 超时: ${method}`))
       }, 15000)
       const finish = () => clearTimeout(timer)
       this.pending.set(id, {
-        resolve: value => { finish(); resolve(value) },
+        resolve: value => {
+          finish()
+          if (method === 'session.resume') this.restoreRequests(value, String(params.session_id ?? ''), requestVersion)
+          resolve(value)
+        },
         reject: error => { finish(); reject(error) },
       })
       try {
@@ -296,15 +306,96 @@ export class GatewayTransport {
     return this.requests
   }
 
-  /** 用原 id 回包。result 结构由 method 决定：
-   *  approval → `{ choice: 'once'|'session'|'always'|'deny' }`
-   *  clarify  → `{ answers: { qid: text }, outcome: 'submitted' }` */
+  private requestKey(request: PendingRequest): string {
+    return JSON.stringify([request.protocol ?? 'rpc', request.sessionId, request.id])
+  }
+
+  private storeRequest(request: PendingRequest): void {
+    const key = this.requestKey(request)
+    this.requests = this.requests.filter(item => this.requestKey(item) !== key)
+    this.requests.push(request)
+    this.requestUpdates.set(key, ++this.requestVersion)
+  }
+
+  private removeRequests(matches: (request: PendingRequest) => boolean): void {
+    this.requests = this.requests.filter(item => {
+      if (!matches(item)) return true
+      this.requestUpdates.set(this.requestKey(item), ++this.requestVersion)
+      return false
+    })
+  }
+
+  private canonicalRequest(
+    prompt: Record<string, unknown>,
+    sessionId: string | undefined,
+    generation?: unknown,
+  ): PendingRequest | undefined {
+    const method = prompt.kind
+    const executionGeneration = prompt.execution_generation ?? generation
+    if ((method !== 'approval' && method !== 'clarify') || typeof prompt.prompt_id !== 'string'
+      || !sessionId || !Number.isSafeInteger(executionGeneration)) return undefined
+    const params = method === 'clarify'
+      ? { ...prompt, session_id: sessionId, questions: [{
+        qid: prompt.prompt_id, question: prompt.question, choices: prompt.choices, multi_select: prompt.multi_select,
+      }] }
+      : { ...prompt, session_id: sessionId, request_id: prompt.prompt_id }
+    return {
+      id: prompt.prompt_id, method, sessionId, params, protocol: 'canonical',
+      executionGeneration: executionGeneration as number, receivedAt: Date.now(),
+    }
+  }
+
+  private restoreRequests(value: unknown, requestedSession: string, version: number): void {
+    if (!value || typeof value !== 'object') return
+    const snapshot = value as Record<string, unknown>
+    const sessionId = typeof snapshot.session_id === 'string' ? snapshot.session_id : requestedSession
+    const restored: PendingRequest[] = []
+    for (const raw of Array.isArray(snapshot.open_requests) ? snapshot.open_requests : []) {
+      if (!raw || typeof raw !== 'object') continue
+      const row = raw as Record<string, unknown>
+      if ((row.method !== 'approval' && row.method !== 'clarify')
+        || (typeof row.id !== 'string' && typeof row.id !== 'number')) continue
+      const params = row.params && typeof row.params === 'object' ? row.params as Record<string, unknown> : {}
+      restored.push({
+        id: row.id, method: row.method, sessionId, params: { ...params, session_id: sessionId }, receivedAt: Date.now(),
+      })
+    }
+    for (const raw of Array.isArray(snapshot.prompts) ? snapshot.prompts : []) {
+      if (!raw || typeof raw !== 'object') continue
+      const request = this.canonicalRequest(raw as Record<string, unknown>, sessionId, snapshot.execution_generation)
+      if (request) restored.push(request)
+    }
+    const changed = new Set([...this.requestUpdates].filter(([, updated]) => updated > version).map(([key]) => key))
+    this.removeRequests(item => item.sessionId === sessionId && !changed.has(this.requestKey(item)))
+    for (const request of restored) {
+      if (!changed.has(this.requestKey(request))) this.storeRequest(request)
+    }
+  }
+
+  /** 按请求原协议回复：canonical 使用代次围栏，反向 RPC 保留服务端原 id。 */
   async respond(id: number | string, result: Record<string, unknown>): Promise<void> {
-    const index = this.requests.findIndex(item => String(item.id) === String(id))
-    if (index < 0) throw new Error('该请求已失效（可能已超时或被撤回）')
-    const ws = await this.ensureOpen()
-    ws.send(JSON.stringify({ jsonrpc: '2.0', id, result }))
-    this.requests.splice(index, 1)
+    const request = this.requests.find(item => String(item.id) === String(id))
+    if (!request) throw new Error('该请求已失效（可能已超时或被撤回）')
+    if (request.protocol === 'canonical') {
+      const params = {
+        session_id: request.sessionId, prompt_id: request.id, execution_generation: request.executionGeneration,
+      }
+      if (request.method === 'approval') {
+        if (!Array.isArray(request.params.choices) || !request.params.choices.includes(result.choice)) {
+          throw new Error('该审批选项不在服务端允许的范围内')
+        }
+        await this.rpc('approval.respond', { ...params, choice: result.choice })
+      } else {
+        const answers = result.answers as Record<string, unknown> | undefined
+        const answer = answers?.[String(request.id)]
+        await this.rpc('clarify.respond', { ...params, answer: typeof answer === 'string' ? answer : '' })
+      }
+    } else {
+      const ws = await this.ensureOpen()
+      if (!this.requests.includes(request)) throw new Error('该请求已失效，请等待连接恢复')
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }))
+    }
+    this.removeRequests(item => item === request)
   }
 
   /** 面板无法回答的交互：明确回错，别让 agent 一直等。 */
@@ -313,7 +404,7 @@ export class GatewayTransport {
     if (index < 0) return
     const ws = await this.ensureOpen()
     ws.send(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32000, message } }))
-    this.requests.splice(index, 1)
+    this.removeRequests(item => item === this.requests[index])
   }
 
   close(): void {

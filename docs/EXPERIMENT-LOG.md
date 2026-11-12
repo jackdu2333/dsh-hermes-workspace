@@ -6,7 +6,7 @@
 
 ## 1. 一句话现状
 
-插件代码**已完成并构建通过**（`pnpm typecheck` / `pnpm build` = 0）：DSH 原生面板直连 Hermes TUI Gateway JSON-RPC，恢复 Delores 的 canonical Bot Chat，人格、记忆、历史连续。P0 只读组与写入组在协议层全部通过。**尚未完成的是 DSH 侧的最终 UI 目视验收**，原因是宿主环境（DSH RC 版）出现两起与插件无关的故障，详见第 5 节。
+插件代码**已完成并构建通过**（`pnpm typecheck` / `pnpm build` = 0）：DSH 原生面板直连 Hermes TUI Gateway JSON-RPC，恢复 Bot A 的 canonical Bot Chat，人格、记忆、历史连续。P0 只读组与写入组在协议层全部通过。**尚未完成的是 DSH 侧的最终 UI 目视验收**，原因是宿主环境（DSH RC 版）出现两起与插件无关的故障，详见第 5 节。
 
 ## 2. 时间线
 
@@ -14,7 +14,7 @@
 |---|---|
 | 上午 | 自建双端聊天工作区 → 接 Desktop SSH 的 REST（发现 headless `serve` 无网页 UI）→ 改为侧栏只做入口；试错 `hermes://open/` 与 iframe `/chat`，均撤回 |
 | 12–14 时 | 复核「Bot Chat 只能在原生窗口」的旧结论：证伪。dashboard `/chat` 是 React SPA + xterm.js + `/api/pty`，无 `X-Frame-Options`；iframe 卡住的真实原因是 gateway listener `withhold_session_token=True` 使 `/api/*` 401 |
-| 14–15 时 | 用户澄清目标：**基础是 DSH 里稳定跟 Delores 等多个 Bot 持续聊、人格与记忆连续，多 Bot 管理是后续**；并纠正「本机 Hermes 只是外壳，数据在 SSH 远端」 |
+| 14–15 时 | 用户澄清目标：**基础是 DSH 里稳定跟 Bot A 等多个 Bot 持续聊、人格与记忆连续，多 Bot 管理是后续**；并纠正「本机 Hermes 只是外壳，数据在 SSH 远端」 |
 | 15 时 | 采纳 [ADR-001](ADR-001-gateway-protocol.md)：以 TUI Gateway JSON-RPC 为唯一主接入协议，否决 iframe / REST / API Server 主链路；落 [P0-00](P0-00-gateway-validation.md) 任务书 |
 | 15–16 时 | E0 通过（`gateway ensure --json` + `_session_ticket`），P0 只读组 E1–E5/E7 全通；随后实施 `GatewayTransport` + DSH 原生面板，清理旧 REST 适配器 |
 | 16–17 时 | 写入组 E6/E9/E10 通过；E8 数据层证明与 Desktop 共用同一条 canonical session；B1（远端模型 400）自愈，二次验证拿到正常回复；修复 UI-01 |
@@ -104,7 +104,7 @@ SSH discovery (hermes gateway ensure --json)
 1. **E8 Desktop 目视**：在 Hermes Desktop 的 Bot Chat 里确认 `[DSH P0-00 E8-B]` 与 `PONG-DSH-OK` 出现（数据层已证共用同一 session）。
 2. **DSH 面板 UI 验收**：UI-01 修复后刷新/重启，确认历史条数、无红字、发送与中断可用；需 DSH 主界面可见且 Hermes Desktop 提供的 SSH 端点在线。
 3. **账号态**：完成登录或配置 API Key，使 `needsWelcome=false`，消除 onboarding 回退。
-4. **多 Bot**：当前远端活跃 Bot 只有 Delores；`profiles.list` 逐个授权连接属于 P1。
+4. **多 Bot**：当前远端活跃 Bot 只有 Bot A；`profiles.list` 逐个授权连接属于 P1。
 5. **端口漂移**：Gateway 端口不可硬编码，每次 discovery；插件已实现，但 SSH 端点 `22222` 仍依赖 Desktop 运行。
 6. **DSH RC 缺陷反馈**：cookie 溢出与 onboarding 回退建议向官方反馈。
 

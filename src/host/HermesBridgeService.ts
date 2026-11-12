@@ -11,7 +11,6 @@ import type {
   EventsPage,
   GatewayStatus,
   InterruptResult,
-  OpenRequest,
   PingResult,
   PromptResult,
   ResumeResult,
@@ -84,6 +83,10 @@ const STREAM_EVENT_TYPES = new Set([
   'agent.step',
   'session.usage',
   'session.info',
+  'approval.request',
+  'approval.settled',
+  'clarify.request',
+  'clarify.settled',
   'error',
   'unsupported_request',
 ])
@@ -116,7 +119,6 @@ export class HermesBridgeService extends TypertRemoteService {
    *  连 profiles.list 都读不到别人的 canonical_session。所以按 profile 各留一条连接。 */
   private readonly transports = new Map<string, GatewayTransport>()
   private dashboardProxy?: DashboardProxy
-  private dashboardOrigin?: string
   private proxyTarget?: string
   private proxyStarting = false
 
@@ -167,6 +169,9 @@ export class HermesBridgeService extends TypertRemoteService {
     if (this.proxyTarget === apiOrigin && this.dashboardProxy) return
     const token = readDashboardToken()
     if (!token) {
+      const previous = this.dashboardProxy
+      this.dashboardProxy = undefined
+      await previous?.close().catch(() => undefined)
       // 标记已尝试，避免每 1.5 秒轮询都读一次 .env 并刷日志；apiOrigin 变化时会重试。
       this.proxyTarget = apiOrigin
       this.hostCtx.logger?.warn?.(
@@ -178,14 +183,12 @@ export class HermesBridgeService extends TypertRemoteService {
     try {
       await this.dashboardProxy?.close().catch(() => undefined)
       this.dashboardProxy = undefined
-      this.dashboardOrigin = undefined
       const url = new URL(apiOrigin)
       const proxy = await startDashboardProxy(
         { host: url.hostname, port: Number(url.port || 80) },
         token,
       )
       this.dashboardProxy = proxy
-      this.dashboardOrigin = proxy.origin
       this.proxyTarget = apiOrigin
       this.hostCtx.logger?.info?.(`hermes-workspace: dashboard proxy ready at ${proxy.origin}`)
     } catch (error) {
@@ -207,7 +210,11 @@ export class HermesBridgeService extends TypertRemoteService {
     if (status.state === 'online' && status.apiOrigin) {
       await this.ensureDashboardProxy(status.apiOrigin)
     }
-    return { ...status, dashboardOrigin: this.dashboardOrigin }
+    return {
+      ...status,
+      // 另一 profile 的旧代理或正在重建的代理不能交给当前 iframe。
+      dashboardOrigin: this.proxyTarget === status.apiOrigin ? this.dashboardProxy?.baseUrl : undefined,
+    }
   }
 
   /** 只列 profile 目录，不逐个握手：N 个 Bot 拉起 N 个 gateway 太重。
@@ -302,7 +309,8 @@ export class HermesBridgeService extends TypertRemoteService {
       messages,
       messageCount: typeof raw.message_count === 'number' ? raw.message_count : messages.length,
       running: Boolean(raw.running),
-      openRequests: (raw.open_requests ?? []) as OpenRequest[],
+      // Transport 在解析 resume 响应时已经将快照与实时变更对账。
+      openRequests: transport.listRequests().filter(item => item.sessionId === String(raw.session_id ?? sessionId)),
       subscriptionId: raw.subscription_id == null ? undefined : String(raw.subscription_id),
       executionGeneration: typeof raw.execution_generation === 'number' ? raw.execution_generation : undefined,
     }

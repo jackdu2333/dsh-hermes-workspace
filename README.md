@@ -2,10 +2,18 @@
 
 > **2026-11-10 现行决策**：见 [ADR-001](docs/ADR-001-gateway-protocol.md)——DSH 原生 UI 直连 Hermes TUI Gateway JSON-RPC；[P0-00](docs/P0-00-gateway-validation.md) 已执行完毕，UI 已实施。
 > 当前阶段：**Gateway Protocol Adapter 已在 DSH 中运行**；现行状态见下方「当前状态（现行）」，标题带「历史」的段落只作留痕。
-> 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`　版本：`0.1.28`
+> 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`　版本：`0.1.29`
 >
 > **0.1.4 起改为本机直连**：不再走 SSH / 端口转发，直接对接本机已运行的 Hermes gateway。
 > **0.1.17 起形态定案**：默认自建气泡对话；「终端」模式内嵌 Hermes TUI。原生桌面端 UI 无法 iframe（原因见「界面形态定案」）。
+
+## 工作区修复（2026-11-11，0.1.29 已发布）
+
+- 终端代理在 HTTP / WebSocket 共用入口验证随机访问路径、Host 和 Origin；沿用 Hermes 的 `X-Forwarded-Prefix` 支持。页面只使用本次代理的临时凭据，Hermes 持久 token 留在 Host，代理重建后旧入口失效。
+- 审批 / 提问同时支持反向 JSON-RPC 与 canonical `approval.request` / `clarify.request`；按原协议回复，并从 `session.resume` 的 `prompts` / `open_requests` 恢复。读取快照期间撤回的请求不会被迟到快照复活。
+- 切换 Bot 后丢弃旧历史、旧轮询和旧打开请求；执行代次随当前会话事件更新，避免中断使用上一轮代次；首次列表加载失败后在连接恢复时重试。
+- 可重复验证：`pnpm test`（隔离 Gateway / 面板状态 / HTTP 与 WebSocket 代理回归）、`pnpm typecheck`、`pnpm build`。测试不发送真实 Bot 消息。
+- 已做隔离浏览器 iframe → 静态资源 → API → WebSocket 联动验证；真实 DSH 安装、Bot 审批 / 提问及双端会话仍需原生环境验收。
 
 ## 界面形态定案（2026-11-10 22:20，0.1.17）
 
@@ -28,7 +36,7 @@
 
 ## 多 Bot 对话（2026-11-10 22:40，0.1.24）
 
-> 用户反馈：只能跟第一个 Bot 聊，第二个「OB 笔记助手」是灰的点不动。
+> 用户反馈：只能跟第一个 Bot 聊，第二个「Bot B」是灰的点不动。
 
 根因不在 UI，而在 **Hermes 的连接模型**：
 
@@ -43,7 +51,7 @@
 | `HermesBridgeService` | `Map<profile, GatewayTransport>`，同一 profile 复用连接；所有 RPC 带 `profile` 路由 |
 | `openBot(profile)` | 连目标 gateway → `profiles.list` 读 canonical（识别依据是标题 `Bot Chat`）→ 没有就 `session.create {title:'Bot Chat', source:'gui', follow_profile_config:true}` → resume |
 | `getBotRoster` | 只读 default 的 profile 目录，不逐个握手（N 个 Bot 拉起 N 个 gateway 太重），可点性不再依赖 `canonicalSessionId` |
-| 显示名 | 取 `ui_meta["hermes-bots"].title`；`display_name` 是空的，所以 Delores / OB 笔记助手 都来自这里 |
+| 显示名 | 取 `ui_meta["hermes-bots"].title`；`display_name` 是空的，所以 Bot A / Bot B 都来自这里 |
 
 已验证：点第二个 Bot 能载入它自己的 27 条历史；用户手动发消息正常，执行步骤正常折叠显示。
 
@@ -209,7 +217,7 @@ RESULT   PASS
 
 ## 目标（现行，ADR-001）
 
-**在 DSH 里稳定跟 Delores 等多个 Bot 持续聊、保持人格与记忆连续**；多 Bot 管理为后续。实现方式是 DSH 原生面板直连 Hermes TUI Gateway JSON-RPC，恢复 Bot Mode 的 canonical Bot Chat，不另建一套聊天。
+**在 DSH 里稳定跟 Bot A 等多个 Bot 持续聊、保持人格与记忆连续**；多 Bot 管理为后续。实现方式是 DSH 原生面板直连 Hermes TUI Gateway JSON-RPC，恢复 Bot Mode 的 canonical Bot Chat，不另建一套聊天。
 
 > 历史阶段（11-10 中午前）：「侧边栏只做入口，不自建聊天区」。下方「非目标」与「当前状态（历史记录）」属该阶段留痕，已失效条目就地标注。
 
@@ -243,7 +251,7 @@ RESULT   PASS
 
 1. **项目准备**：空目录 → README / git / `.gitignore`
 2. **工程骨架**：Host `HermesBridgeService` + Client 侧栏入口，按 V1.0 PRD 的 `8642 /v1/runs`
-3. **改接现有 SSH**：用户本机 Hermes Desktop 连远程 `jackdu@127.0.0.1:22222`，本地转发端口会变（59585 → 63039）。REST 能列会话，但那是 **headless `hermes serve`，没有网页 UI**
+3. **改接现有 SSH**：用户本机 Hermes Desktop 连远程 `<user>@127.0.0.1:22222`，本地转发端口会变（59585 → 63039）。REST 能列会话，但那是 **headless `hermes serve`，没有网页 UI**
 4. **用户改需求**：侧栏只要进原生 Bot 聊天区，插件不自建 UI
 5. **误接 Desktop deeplink** `hermes://open/`：能打开 App，但不是「DSH 容器里显示对话」
 6. **误 iframe `58559/chat`**：页面能出来，但 Chat 一直 Loading 并闪烁
@@ -272,7 +280,7 @@ RESULT   PASS
 - `serve` 与 `dashboard` 不要抢同一端口：dashboard 带 SPA，serve 给 Desktop 远程后端。
 - 8642 默认 **无 CORS**，浏览器不能当页面用。
 - API 会话不能接管 CLI / TUI / Desktop / 渠道已有会话（409 `permission_denied`）。
-- 本机实测 SSH 目标：`jackdu@127.0.0.1:22222`，远端 `/Users/jackdu/.local/bin/hermes` v0.23.0，Bot 名 Delores。Desktop 自己维护隧道，插件不创建 SSH。
+- 本机实测 SSH 目标：`<user>@127.0.0.1:22222`，远端 `~/.local/bin/hermes` v0.23.0，Bot 名 Bot A。Desktop 自己维护隧道，插件不创建 SSH。
 
 因此 DSH 侧边栏 **不能** 画出官方 Bot 对话区。能做的只有：打开 Hermes Desktop，或打开 dashboard `/chat` 自己的窗口。
 
@@ -298,7 +306,7 @@ mkdir -p dist && pnpm pack --pack-destination dist
 
 由 `plugin_manager install_bundle` 安装，不要手改 `~/.dsh/profiles/desktop/package.json`。`lib/index.js` 是 Host，`lib/client.js` 是 Web Client。
 
-- **推荐安装源**：`dist/jackdu-dsh-hermes-workspace-0.1.4.tgz` 的绝对路径（本地 tarball，避开私有 Git 仓库认证问题）；也可直接给项目根目录的绝对路径。
+- **推荐安装源**：`dsh plugin add https://github.com/jackdu2333/dsh-hermes-workspace/releases/latest/download/dsh-hermes-workspace.tgz`（GitHub Release 预构建包，无需本地构建）；也可从公开仓库源码或本地项目根目录安装。
 - **DSH 版本闸门**：`engines.dsh = ">=0.2.2-rc.1"` 是唯一裁决项（存在时忽略 peerDependencies）。低于该版本会以 `incompatible-version` 被拒；确需在旧版运行时，用 `dsh plugin allow-version '@jackdu/dsh-hermes-workspace@0.1.0' --dsh-version <version> --accept-risk` 加精确版本豁免后重试。
 - **可重复验证**：`node dist/verify-client.cjs dist/jackdu-dsh-hermes-workspace-0.1.0.tgz` 验证 Client 挂载失败时的降级行为。
 

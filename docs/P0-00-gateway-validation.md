@@ -15,12 +15,12 @@
 
 | 项 | 值 |
 |---|---|
-| SSH | `ssh -o BatchMode=yes -o ConnectTimeout=6 -p 22222 jackdu@127.0.0.1 '<cmd>'`（免密可用） |
+| SSH | `ssh -o BatchMode=yes -o ConnectTimeout=6 -p 22222 <user>@127.0.0.1 '<cmd>'`（免密可用） |
 | 远端 Hermes | v0.23.0，`~/.local/bin/hermes`，`HERMES_HOME=~/.hermes` |
 | Python | **必须用** `~/.hermes/tools/python-3.14.*/bin/python3`；系统 `python3` 会在 `gateway/session_contract.py` 报 `TypeError: unsupported operand type(s) for \|` |
 | Gateway endpoint | 每次执行 `hermes gateway ensure --json` 取 `endpoint.api_origin`（本次 `http://127.0.0.1:55015`），**不硬编码** |
 | canonical Bot Chat | `state.db` 的 `sessions.title='Bot Chat'` → 本次 `local-b29ce87dfe6b7cd985834af1d6858913e138a85d711bb7f2dfc876d2dc22bb6f`（运行时复核） |
-| Bot 标记 | 根 `~/.hermes/profile.yaml` 的 `ui_meta.hermes-bots`，`title: Delores` |
+| Bot 标记 | 根 `~/.hermes/profile.yaml` 的 `ui_meta.hermes-bots`，`title: Bot A` |
 | 协议 | `/api/ws`；subprotocols `["hermes-gateway-v1", "hermes-gateway-ticket.<ticket>"]` |
 
 > WorkBuddy Bash 沙箱看到的 `~/.hermes` 是另一套副本（v0.23.1 / 58559），**不是**本任务的目标环境。
@@ -55,7 +55,7 @@ E7 events: gateway.ready / platforms.changed
 - 最终 `src/host/gatewayRemote.ts` 经真实 smoke test：`connect: online` → `profiles: 1 / bot_mode_protocol: true` → `resume: 14 messages` → 事件 `gateway.ready`。
 - 两个坑：远端必须用 Hermes venv Python（`~/.hermes/installs/*/environments/*/venv/bin/python`；系统 `python3` 语法过旧且缺 `websockets`）；`session.resume` 的 `lazy=true` 返回 `invalid_params`，须用 `defer_history=true`。
 
-### 写入组（**需要用户单独授权**；会真的写进 Delores 的 Bot Chat）
+### 写入组（**需要用户单独授权**；会真的写进 Bot A 的 Bot Chat）
 
 | ID | 测试 | 通过标准 |
 |---|---|---|
@@ -124,7 +124,7 @@ capabilities= ['durable-admission-v1', 'event-replay-v1', 'session-authority-v1'
 ticket_minted= True ticket_len= 43
 ws_url= ws://127.0.0.1:55015/api/ws
 subprotocols= ['hermes-gateway-v1', 'hermes-gateway-ticket.<redacted>']
-profile_id= /Users/jackdu/.hermes instance_id= 7af141cd561e4152bb9d73b88a914947
+profile_id= ~/.hermes instance_id=<redacted>
 ```
 
 结论：**v0.23.0 不需要升级也能拿到 ticket**；缺的只是 `gateway attach` 这个 CLI 包装。

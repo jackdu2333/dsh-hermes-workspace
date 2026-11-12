@@ -1,8 +1,9 @@
 {
   "name": "@jackdu/dsh-hermes-workspace",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "private": true,
   "description": "Native Hermes Bot workspace for DeepSeek Harness",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "dsh": ">=0.2.2-rc.1",
@@ -26,7 +27,8 @@
   ],
   "scripts": {
     "build": "tsdown",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.cjs"
   },
   "dsh": {
     "bundle": {
@@ -52,8 +54,8 @@
     "typescript": "^5.7.3"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-typert-protocol": "0.1.0-rc.6",
-    "@deepseek-ai/schemastery": "3.19.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
+    "@deepseek-ai/schemastery": ">=3.19.0 <4",
     "react": "^18.2.0 || ^19.0.0"
   },
   "peerDependenciesMeta": {

@@ -9,7 +9,7 @@
 
 用户目标（2026-11-10 澄清）：
 
-- **基础**：在 DSH 里稳定跟 Delores 等多个 Bot 持续聊，保持人格与记忆连续。
+- **基础**：在 DSH 里稳定跟 Bot A 等多个 Bot 持续聊，保持人格与记忆连续。
 - **后续**：多 Bot 管理。
 - 本机 Hermes 只是客户端外壳，**真实数据在 SSH 远端**。WorkBuddy 的 Bash 沙箱看到的 `~/.hermes` 是另一套副本（v0.23.1 / 58559），**不得作为事实源**。
 
@@ -40,8 +40,8 @@
 
 ### 3.1 已验证事实（2026-11-10 实测）
 
-- SSH 通道 `ssh -o BatchMode=yes -p 22222 jackdu@127.0.0.1` 免密可用；远端为 Hermes **v0.23.0**，用户 `jackdu`。
-- 远端根 `~/.hermes/profile.yaml` 有 `ui_meta.hermes-bots`、`title: Delores` → **Bot-Mode-managed 安装**。
+- SSH 通道 `ssh -o BatchMode=yes -p 22222 <user>@127.0.0.1` 免密可用；远端为 Hermes **v0.23.0**，用户 `<user>`。
+- 远端根 `~/.hermes/profile.yaml` 有 `ui_meta.hermes-bots`、`title: Bot A` → **Bot-Mode-managed 安装**。
 - `state.db` 的 `sessions.title` 列有一条 `Bot Chat`：`local-b29ce87dfe6b7cd985834af1d6858913e138a85d711bb7f2dfc876d2dc22bb6f`（source=gui / created_source=desktop / model=gpt-6-luna）。**canonical 会话真实存在，记忆连续的地基不是空的**。
 - `hermes gateway ensure --json` 返回 `state=ready`、`endpoint.api_origin=http://127.0.0.1:55015`、`capabilities=[durable-admission-v1, event-replay-v1, session-authority-v1]`、`runtime_protocol=1`。
 - **E0 通过**：用 Hermes 自带 Python 调 `_session_ticket` + `gateway_ws_target`，得到 `ws://127.0.0.1:55015/api/ws` 与 `["hermes-gateway-v1", "hermes-gateway-ticket.<ticket>"]`（ticket 长度 43）。**未建立 WS 连接、未发消息，ticket 未使用即过期**。详见 P0-00 第 3 节。
@@ -91,7 +91,7 @@
 | 审批 / 澄清请求 | **已实现保守拒绝** | 带 id 的非 event 请求回 `-32000` 并推 `unsupported_request` 事件；交互 UI 属 P1 |
 | ~~B1 远端模型 400~~ | **已自愈（16:38）** | 16:13 的两次 `400 Bad Request` 是瞬时故障；同一 provider 16:28 起恢复正常，16:38 二次验证拿到 `PONG-DSH-OK`。**无需改动 Hermes 配置** |
 | **UI-01 面板带参 Remote** | **已修复 / 待刷新验收** | Client `$mount` descriptor 与 Host SRC 派生结果不一致，导致带参方法把业务参数当 `AbortSignal`；详见 P0-00 第 7 节 |
-| 多 Bot | P1 | 当前远端活跃 Bot 只有 Delores（default profile 被标记为 Bot）；`profiles/` 仅有 `.deleted/obsidian` |
+| 多 Bot | P1 | 当前远端活跃 Bot 只有 Bot A（default profile 被标记为 Bot）；`profiles/` 仅有 `.deleted/obsidian` |
 
 ## 7. 后果
 

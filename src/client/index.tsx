@@ -321,6 +321,10 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
   const sessionRef = useRef<string | null>(null)
   const profileRef = useRef<string | null>(null)
   const generationRef = useRef<number | undefined>(undefined)
+  /** 每次打开 Bot 都递增；同一 Bot 来回切换也不能接纳上一次打开的迟到响应。 */
+  const sessionVersionRef = useRef(0)
+  const openingRef = useRef(false)
+  const rosterLoadingRef = useRef(false)
   const previousState = useRef<GatewayStatus['state']>('disconnected')
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -338,12 +342,20 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
 
   /** resume 同时提供历史与执行代次；后者是 interrupt / steer 的必需参数。 */
   function applyResume(resumed: ResumeResult, profile: string): void {
+    const sameSession = sessionRef.current === resumed.sessionId && profileRef.current === profile
     sessionRef.current = resumed.sessionId
     profileRef.current = profile
-    generationRef.current = resumed.executionGeneration
+    generationRef.current = sameSession && generationRef.current !== undefined
+      ? Math.max(generationRef.current, resumed.executionGeneration ?? generationRef.current)
+      : resumed.executionGeneration
     setActiveProfile(profile)
     setSessionId(resumed.sessionId)
     setMessages(resumed.messages)
+    setRequests(resumed.openRequests)
+    if (!sameSession && resumed.running) {
+      liveRef.current.active = true
+      liveStartedAt.current = Date.now()
+    }
   }
 
   /** 刷新历史 / 事件都要落在当前 Bot 自己那条连接上。 */
@@ -366,6 +378,13 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
     let completed = false
     for (const event of incoming) {
       const payload = (event.payload ?? {}) as Record<string, unknown>
+      const eventSession = event.session_id ?? event.sessionId
+      if (eventSession && eventSession !== sessionRef.current) continue
+      const generation = event.execution_generation ?? payload.execution_generation
+      if (typeof generation === 'number') {
+        if (generationRef.current !== undefined && generation < generationRef.current) continue
+        generationRef.current = generation
+      }
       switch (event.type) {
         case 'message.start': {
           if (!live.active) {
@@ -471,40 +490,58 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
       }
     }
     if (changed) setLiveVersion(value => value + 1)
-    if (completed) void refreshHistory().then(() => resetLive())
+    if (completed) void refreshHistory().then(applied => {
+      if (applied && liveRef.current === live && !live.active) resetLive()
+    })
   }
 
-  async function refreshHistory(): Promise<void> {
-    if (!api || !sessionRef.current) return
+  async function refreshHistory(): Promise<boolean> {
+    const requestedSession = sessionRef.current
+    const profile = currentProfile()
+    const version = sessionVersionRef.current
+    if (!api || !requestedSession || openingRef.current) return false
     try {
-      const resumed = await api.resumeSession({ sessionId: sessionRef.current, profile: currentProfile() })
+      const resumed = await api.resumeSession({ sessionId: requestedSession, profile })
+      if (version !== sessionVersionRef.current || profile !== currentProfile()
+        || requestedSession !== sessionRef.current || openingRef.current) return false
+      if (resumed.executionGeneration !== undefined && generationRef.current !== undefined
+        && resumed.executionGeneration < generationRef.current) return false
       // 乐观插入的那条还没落库时不能拿历史覆盖它；等它出现（或超时）再对齐。
       const pending = pendingTextRef.current
       if (pending && Date.now() - pendingSinceRef.current < 8000) {
         const landed = resumed.messages.some(message => message.role === 'user' && message.text.trim() === pending)
-        if (!landed) return
+        if (!landed) return false
       }
       pendingTextRef.current = null
-      applyResume(resumed, profileRef.current ?? '')
+      applyResume(resumed, profile ?? '')
+      return true
     } catch {
-      // 轮询刷新失败时保留上一次历史，不打断界面
+      // 失败或过期快照不能触发草稿清理。
+      return false
     }
   }
 
   async function loadRoster(): Promise<void> {
-    if (!api) return
-    const roster = await api.getBotRoster()
-    setProfiles(roster.profiles)
-    if (profileRef.current !== null) return
-    // 默认打开 default Bot；它没有会话时 openBot 会自动建一条，不会卡在空白。
-    const preferred = roster.profiles.find(row => row.isDefault) ?? roster.profiles[0]
-    if (preferred) await openBot(preferred)
+    if (!api || rosterLoadingRef.current) return
+    rosterLoadingRef.current = true
+    try {
+      const roster = await api.getBotRoster()
+      setProfiles(roster.profiles)
+      if (profileRef.current !== null || openingRef.current) return
+      // 初次连接失败后仍可重新初始化，且不覆盖用户正在打开的 Bot。
+      const preferred = roster.profiles.find(row => row.isDefault) ?? roster.profiles[0]
+      if (preferred) await openBot(preferred)
+    } finally {
+      rosterLoadingRef.current = false
+    }
   }
 
   /** 打开 Bot：主机侧会连上该 profile 自己的 gateway、找（或建）canonical 会话再返回历史。
    *  所以列表项不能再按「有没有 sessionId」置灰——那个字段在别的 profile 上本来就读不到。 */
   async function openBot(row: BotProfile): Promise<void> {
     if (!api) return
+    const version = ++sessionVersionRef.current
+    openingRef.current = true
     setBusy(true)
     setPendingProfile(row.name)
     setError(null)
@@ -512,13 +549,22 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
       // 切 Bot 时把上一轮的草稿丢掉，否则会串到另一个会话里。
       resetLive()
       pendingTextRef.current = null
-      applyResume(await api.openBot({ profile: row.name }), row.name)
+      setRequests([])
+      setEvents([])
+      setStatus(null)
+      previousState.current = 'disconnected'
+      const resumed = await api.openBot({ profile: row.name })
+      if (version !== sessionVersionRef.current) return
+      applyResume(resumed, row.name)
       stickToBottom.current = true
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      if (version === sessionVersionRef.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setBusy(false)
-      setPendingProfile(null)
+      if (version === sessionVersionRef.current) {
+        openingRef.current = false
+        setBusy(false)
+        setPendingProfile(null)
+      }
     }
   }
 
@@ -627,34 +673,42 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
     })()
     const tick = async (): Promise<void> => {
       if (cancelled) return
+      const version = sessionVersionRef.current
+      const profile = currentProfile()
+      const isCurrent = () => !cancelled && version === sessionVersionRef.current && !openingRef.current
       try {
         // 状态灯不跟着流式节奏跑，1.2 秒一次足够，免得每 160ms 都走一遍 discovery。
-        if (Date.now() - lastStatusAt > 1200) {
+        if (isCurrent() && Date.now() - lastStatusAt > 1200) {
           lastStatusAt = Date.now()
-          const next = await api.getConnectionStatus({ profile: currentProfile() })
-          if (cancelled) return
-          setStatus(next)
-          const recovered = previousState.current !== 'online' && next.state === 'online'
-          previousState.current = next.state
-          // 重连后统一走 refreshHistory：它带有「乐观消息还没落库就别覆盖」的保护。
-          if (recovered && sessionRef.current) await refreshHistory()
+          const next = await api.getConnectionStatus({ profile })
+          if (isCurrent()) {
+            setStatus(next)
+            const recovered = previousState.current !== 'online' && next.state === 'online'
+            previousState.current = next.state
+            if (next.state === 'online' && !sessionRef.current) await loadRoster()
+            else if (recovered && sessionRef.current) await refreshHistory()
+          }
         }
-        const page = await api.getEvents({ profile: currentProfile() })
-        if (!cancelled && page.events.length) {
-          setEvents(previous => [...previous, ...page.events].slice(-40))
-          applyEvents(page.events)
-        }
-        if (!cancelled) {
-          const incoming = page.requests ?? []
-          // 内容没变就复用旧引用，避免每 160ms 都因为新数组重渲染一次。
-          setRequests(previous =>
-            previous.length === incoming.length && previous.every((item, index) => item.id === incoming[index].id)
-              ? previous
-              : incoming,
-          )
+        if (isCurrent()) {
+          const page = await api.getEvents({ profile })
+          if (isCurrent()) {
+            if (page.events.length) {
+              setEvents(previous => [...previous, ...page.events].slice(-40))
+              applyEvents(page.events)
+            }
+            const incoming = page.requests ?? []
+            setRequests(previous =>
+              previous.length === incoming.length && previous.every((item, index) =>
+                item.id === incoming[index].id && item.sessionId === incoming[index].sessionId
+                && item.executionGeneration === incoming[index].executionGeneration
+                && item.receivedAt === incoming[index].receivedAt)
+                ? previous
+                : incoming,
+            )
+          }
         }
         // 兜底：complete 帧在断线时可能丢，超过 12 秒没有收尾就把历史对齐一次。
-        if (liveRef.current.active && liveStartedAt.current && Date.now() - liveStartedAt.current > 12000) {
+        if (isCurrent() && liveRef.current.active && liveStartedAt.current && Date.now() - liveStartedAt.current > 12000) {
           liveStartedAt.current = Date.now()
           await refreshHistory()
         }
@@ -667,7 +721,7 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
       }
     }
     void tick()
-    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+    return () => { cancelled = true; sessionVersionRef.current++; if (timer) clearTimeout(timer) }
   }, [api])
 
   // 新消息到达后贴住底部，和原生聊天一致；用户主动上翻时不打扰。
@@ -687,7 +741,7 @@ function HermesChatPanel(props: { api?: PanelApi; mountError?: string | null }) 
   const state = status?.state ?? 'disconnected'
   const active = profiles.find(row => row.name === activeProfile) ?? null
   const canSend = Boolean(sessionId) && !busy && Boolean(draft.trim())
-  /** 原生界面走 Host 的本地反代（已注入 dashboard token），不能直连 gateway 端口。 */
+  /** 入口已包含代理的临时访问路径；Hermes 的持久 token 不进入浏览器。 */
   const nativeOrigin = status?.dashboardOrigin
   /** `/bots` 只是导航壳子、没有对应页面组件（主区会全黑）。
    *  Dashboard 里真正的对话页是 `/chat?resume=<sessionId>`；未选 Bot 时退回会话列表。 */
@@ -998,7 +1052,11 @@ function ClarifyCard({
       multiSelect: row.multi_select === true,
     }
   })
-  const [answers, setAnswers] = useState<Record<string, string>>({})
+  const [answers, setAnswers] = useState<Record<string, string>>(() => {
+    const restored = request.params.answers
+    if (!restored || typeof restored !== 'object') return {}
+    return Object.fromEntries(Object.entries(restored).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+  })
 
   const toggle = (question: ClarifyQuestion, choice: string) => {
     setAnswers(previous => {

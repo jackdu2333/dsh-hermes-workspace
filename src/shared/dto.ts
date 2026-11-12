@@ -6,7 +6,7 @@ export interface GatewayStatus {
   instanceId?: string
   profileId?: string
   apiOrigin?: string
-  /** 本地反代 origin：iframe 用它加载 Hermes 原生 Dashboard（已注入 dashboard token）。 */
+  /** 本地反代入口，包含本次代理实例的随机访问路径，不暴露 Hermes 的持久 token。 */
   dashboardOrigin?: string
   errorMessage?: string
   checkedAt: number
@@ -46,18 +46,12 @@ export interface ChatMessage {
   timestamp?: string
 }
 
-export interface OpenRequest {
-  id?: string
-  kind?: string
-  [key: string]: unknown
-}
-
 export interface ResumeResult {
   sessionId: string
   messages: ChatMessage[]
   messageCount: number
   running: boolean
-  openRequests: OpenRequest[]
+  openRequests: PendingRequest[]
   subscriptionId?: string
   /** session.interrupt / steer 必须回传的执行代次，防止误中断另一个 turn。 */
   executionGeneration?: number
@@ -80,7 +74,9 @@ export interface InterruptResult {
  *  - message.complete: { text, outcome, usage } */
 export interface GatewayEvent {
   type: string
+  session_id?: string
   sessionId?: string
+  execution_generation?: number
   payload?: Record<string, unknown>
   [key: string]: unknown
 }
@@ -94,6 +90,9 @@ export interface PendingRequest {
   sessionId?: string
   params: Record<string, unknown>
   receivedAt: number
+  /** canonical prompt 使用带执行代次的普通 RPC 回复，其余请求使用原 JSON-RPC id。 */
+  protocol?: 'canonical'
+  executionGeneration?: number
 }
 
 export interface EventsPage {
