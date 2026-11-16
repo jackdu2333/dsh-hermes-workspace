@@ -2,7 +2,7 @@
 
 > **2026-11-10 现行决策**：见 [ADR-001](docs/ADR-001-gateway-protocol.md)——DSH 原生 UI 直连 Hermes TUI Gateway JSON-RPC；[P0-00](docs/P0-00-gateway-validation.md) 已执行完毕，UI 已实施。
 > 当前阶段：**Gateway Protocol Adapter 已在 DSH 中运行**；现行状态见下方「当前状态（现行）」，标题带「历史」的段落只作留痕。
-> 插件包名：`@jackdu/dsh-hermes-workspace`　面板 ID：`hermes-workspace`　版本：`0.1.29`
+> 插件包名：`@jackdu2333/dsh-hermes-workspace`　面板 ID：`hermes-workspace`　版本：`0.1.30`
 >
 > **0.1.4 起改为本机直连**：不再走 SSH / 端口转发，直接对接本机已运行的 Hermes gateway。
 > **0.1.17 起形态定案**：默认自建气泡对话；「终端」模式内嵌 Hermes TUI。原生桌面端 UI 无法 iframe（原因见「界面形态定案」）。
@@ -346,7 +346,7 @@ RESULT   PASS
 | 持续 | `127.0.0.1:58559` | 本机 gateway 带 SPA，`/chat` 是 Dashboard HTML |
 | 未监听 | `9119`、`8642`、`18642` | 官方默认端口，本机当时没开 |
 
-Token：Desktop SSH 连接的 dashboard token 曾以明文写在 `~/.hermes/gateway-connections.json`。插件若保存，只进 DSH Credentials：`@jackdu/dsh-hermes-workspace/default-api-key`。文档不抄密钥。
+Token：Desktop SSH 连接的 dashboard token 曾以明文写在 `~/.hermes/gateway-connections.json`。插件若保存，只进 DSH Credentials：`@jackdu2333/dsh-hermes-workspace/default-api-key`。文档不抄密钥。
 
 ## 安装与开发
 
@@ -360,7 +360,7 @@ mkdir -p dist && pnpm pack --pack-destination dist
 由 `plugin_manager install_bundle` 安装，不要手改 `~/.dsh/profiles/desktop/package.json`。`lib/index.js` 是 Host，`lib/client.js` 是 Web Client。
 
 - **推荐安装源**：`dsh plugin add https://github.com/jackdu2333/dsh-hermes-workspace/releases/latest/download/dsh-hermes-workspace.tgz`（GitHub Release 预构建包，无需本地构建）；也可从公开仓库源码或本地项目根目录打包安装（`dist/jackdu-dsh-hermes-workspace-0.1.29.tgz`）。
-- **DSH 版本闸门**：`engines.dsh = ">=0.2.2-rc.1"` 是唯一裁决项（存在时忽略 peerDependencies）。低于该版本会以 `incompatible-version` 被拒；确需在旧版运行时，用 `dsh plugin allow-version '@jackdu/dsh-hermes-workspace@0.1.29' --dsh-version <version> --accept-risk` 加精确版本豁免后重试。
+- **DSH 版本闸门**：`engines.dsh = ">=0.2.2-rc.1"` 是唯一裁决项（存在时忽略 peerDependencies）。低于该版本会以 `incompatible-version` 被拒；确需在旧版运行时，用 `dsh plugin allow-version '@jackdu2333/dsh-hermes-workspace@0.1.30' --dsh-version <version> --accept-risk` 加精确版本豁免后重试。
 - **可重复验证**：`node dist/verify-client.cjs dist/jackdu-dsh-hermes-workspace-0.1.29.tgz` 验证 Client 挂载失败时的降级行为。
 
 ## 事实源与维护约定

@@ -1,5 +1,5 @@
 /** 插件包名，与 package.json name 一致。 */
-export const PACKAGE_NAME = '@jackdu/dsh-hermes-workspace'
+export const PACKAGE_NAME = '@jackdu2333/dsh-hermes-workspace'
 
 /** Loader 行 id / 左侧面板 id / main keyed slot key。 */
 export const PANEL_ID = 'hermes-workspace'

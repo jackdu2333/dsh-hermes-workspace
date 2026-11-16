@@ -1,6 +1,6 @@
 import { defineConfig } from 'tsdown'
 
-const ID = '@jackdu/dsh-hermes-workspace'
+const ID = '@jackdu2333/dsh-hermes-workspace'
 const EXTERNALS = ['react', 'react/jsx-runtime', '@deepseek-ai/dsh-typert-protocol', '@deepseek-ai/schemastery']
 
 export default defineConfig([
