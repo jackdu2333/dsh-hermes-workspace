@@ -1,9 +1,19 @@
 {
   "name": "@jackdu/dsh-hermes-workspace",
   "version": "0.1.29",
-  "private": true,
   "description": "Native Hermes Bot workspace for DeepSeek Harness",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jackdu2333/dsh-hermes-workspace.git"
+  },
+  "homepage": "https://github.com/jackdu2333/dsh-hermes-workspace#readme",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "hermes",
+    "deepseek-harness"
+  ],
   "type": "module",
   "engines": {
     "dsh": ">=0.2.2-rc.1",
